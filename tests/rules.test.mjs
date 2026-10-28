@@ -13,10 +13,11 @@ after(async () => { await env?.cleanup(); });
 beforeEach(async () => {
   await env.clearFirestore();
   await env.withSecurityRulesDisabled(async ctx => {
-    await setDoc(doc(ctx.firestore(), 'enrollments/a'), {approved: true});
-    await setDoc(doc(ctx.firestore(), 'enrollments/b'), {approved: true});
-    await setDoc(doc(ctx.firestore(), 'policies/a'), {schema_version: 1, revision: 1, block_tethering: true});
-    await setDoc(doc(ctx.firestore(), 'policies/b'), {schema_version: 1, revision: 1, block_tethering: true});
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'enrollments/a'), {approved: true});
+    await setDoc(doc(db, 'enrollments/b'), {approved: true});
+    await setDoc(doc(db, 'policies/a'), {schema_version: 1, revision: 1, block_tethering: true});
+    await setDoc(doc(db, 'policies/b'), {schema_version: 1, revision: 1, block_tethering: true});
   });
 });
 const status = () => ({device_owner: true, applied_revision: 1, tethering_restricted: true,
