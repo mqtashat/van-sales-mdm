@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function own(uid) { return request.auth != null && request.auth.uid == uid; }
+    function approved(uid) {
+      return own(uid) && exists(/databases/$(database)/documents/enrollments/$(uid))
+        && get(/databases/$(database)/documents/enrollments/$(uid)).data.approved == true;
+    }
+    // Enrollment approval and policy writes are console/IAM admin only in this pilot.
+    match /enrollments/{uid} {
+      allow get: if own(uid);
+      allow list, create, update, delete: if false;
+    }
+    match /policies/{uid} {
+      allow get: if approved(uid);
+      allow list, create, update, delete: if false;
+    }
+    match /deviceStatus/{uid} {
+      allow get: if approved(uid);
+      allow create, update: if approved(uid)
+        && request.resource.data.keys().hasAll(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version'])
+        && request.resource.data.keys().hasOnly(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version'])
+        && request.resource.data.device_owner is bool
+        && request.resource.data.applied_revision is int
+        && request.resource.data.applied_revision >= 0
+        && request.resource.data.tethering_restricted is bool
+        && request.resource.data.last_seen == request.time
+        && request.resource.data.model is string && request.resource.data.model.size() <= 200
+        && request.resource.data.android_sdk is int
+        && request.resource.data.battery_percent is int
+        && request.resource.data.error is string && request.resource.data.error.size() <= 1000
+        && request.resource.data.agent_version is string && request.resource.data.agent_version.size() <= 40;
+      allow list, delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

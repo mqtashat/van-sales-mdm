@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1033399080852",
+    "project_id": "vansales-mdm",
+    "storage_bucket": "vansales-mdm.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1033399080852:android:9590909ef8b0d4bf1ae181",
+        "android_client_info": {
+          "package_name": "com.company.mdmagent"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAx7s19Ia53b00w8C2ynxGGjA88BaDm-yE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
