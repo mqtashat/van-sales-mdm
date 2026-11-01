@@ -9,8 +9,30 @@ android {
         applicationId 'com.company.mdmagent'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0-pilot'
+        versionCode 4
+        versionName '0.3.1-pilot'
+    }
+    signingConfigs {
+        debug {
+            // CI must use the persistent PKCS12 key; never silently generate a replacement.
+            def signingNames = ['ANDROID_KEYSTORE_PATH', 'ANDROID_KEYSTORE_PASSWORD',
+                                'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD']
+            def strictSigning = System.getenv('INJAZ_REQUIRE_SIGNING') == 'true'
+            def signingValues = signingNames.collectEntries { [(it): System.getenv(it)] }
+            def anyConfigured = signingValues.values().any { it != null && !it.isEmpty() }
+            if (strictSigning || anyConfigured) {
+                signingNames.each { name ->
+                    if (!signingValues[name]) throw new GradleException("Missing signing setting: " + name)
+                }
+                def signingFile = file(signingValues['ANDROID_KEYSTORE_PATH'])
+                if (!signingFile.isFile()) throw new GradleException('Signing keystore file not found')
+                storeFile signingFile
+                storeType 'PKCS12'
+                storePassword signingValues['ANDROID_KEYSTORE_PASSWORD']
+                keyAlias signingValues['ANDROID_KEY_ALIAS']
+                keyPassword signingValues['ANDROID_KEY_PASSWORD']
+            }
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -22,8 +44,12 @@ dependencies {
     implementation platform('com.google.firebase:firebase-bom:33.7.0')
     implementation 'com.google.firebase:firebase-auth'
     implementation 'com.google.firebase:firebase-firestore'
+    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.firebase:firebase-functions'
     implementation 'androidx.work:work-runtime:2.9.1'
     // WorkManager exposes ListenableFuture; provide Guava on the Java compile classpath.
     implementation 'com.google.guava:guava:33.3.1-android'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
 }
+
