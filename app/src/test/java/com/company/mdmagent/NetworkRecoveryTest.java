@@ -1,11 +1,16 @@
 package com.company.mdmagent;
 
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.robolectric.RobolectricTestRunner;
+import org.robolectric.annotation.Config;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import com.google.firebase.firestore.FirebaseFirestoreException;
 import static org.junit.Assert.*;
 
+@RunWith(RobolectricTestRunner.class)
+@Config(manifest = Config.NONE, sdk = 28)
 public class NetworkRecoveryTest {
     @Test public void wanRestorationOnSameWifiRequestsSyncOnce() {
         NetworkRecoveryState state = new NetworkRecoveryState();
