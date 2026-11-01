@@ -70,7 +70,9 @@ public class PolicyMessagingService extends FirebaseMessagingService {
         SyncEngine.requestSync(this, "fcm_received");
         OneTimeWorkRequest.Builder backup = new OneTimeWorkRequest.Builder(SyncWorker.class)
                 .setConstraints(new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build());
-        if (message.getPriority() == RemoteMessage.PRIORITY_HIGH) {
+        // Older WorkManager expedited jobs require a separate ForegroundInfo implementation.
+        // The Device Owner foreground service remains the primary path on API 26–30.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && message.getPriority() == RemoteMessage.PRIORITY_HIGH) {
             backup.setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST);
         }
         WorkManager.getInstance(this).enqueueUniqueWork("policy-push-sync", ExistingWorkPolicy.KEEP, backup.build());

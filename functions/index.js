@@ -5,27 +5,18 @@ const {getMessaging} = require('firebase-admin/messaging');
 const {onCall, HttpsError} = require('firebase-functions/v2/https');
 const {onDocumentWritten} = require('firebase-functions/v2/firestore');
 const logger = require('firebase-functions/logger');
-const {validateRegistration, endpointChanged, dispatch} = require('./push');
+const {registerEndpoint, endpointChanged, dispatch} = require('./push');
 initializeApp();
 const db = getFirestore();
 const options = {region: 'us-central1', maxInstances: 2, memory: '256MiB', timeoutSeconds: 60};
 
 exports.registerMdmPush = onCall(options, async request => {
-  const error = validateRegistration(request.auth, request.data);
-  if (error) throw new HttpsError(error, 'Authenticated device and valid registration required.');
-  const uid = request.auth.uid; // Never accept a caller-selected UID.
-  const ref = db.doc(`devicePush/${uid}`);
-  await db.runTransaction(async tx => {
-    const enrollment = await tx.get(db.doc(`enrollments/${uid}`));
-    if (enrollment.data()?.approved !== true) throw new HttpsError('permission-denied', 'Device is not approved.');
-    tx.set(ref, {
-      token: request.data.token,
-      notifications_enabled: request.data.notifications_enabled,
-      agent_version: request.data.agent_version,
-      updated_at: FieldValue.serverTimestamp()
-    });
-  });
-  return {registered: true};
+  try {
+    return await registerEndpoint(request.auth, request.data, db, () => FieldValue.serverTimestamp());
+  } catch (error) {
+    const code = ['unauthenticated', 'invalid-argument', 'permission-denied'].includes(error.code) ? error.code : 'internal';
+    throw new HttpsError(code, 'Authenticated approved device and valid registration required.');
+  }
 });
 
 const deps = {

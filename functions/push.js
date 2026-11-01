@@ -8,6 +8,22 @@ function validateRegistration(auth, data) {
       || typeof data.agent_version !== 'string' || data.agent_version.length > 40) return 'invalid-argument';
   return null;
 }
+async function registerEndpoint(auth, data, db, timestamp) {
+  const code = validateRegistration(auth, data);
+  if (code) throw Object.assign(new Error('Invalid registration'), {code});
+  const uid = auth.uid;
+  await db.runTransaction(async tx => {
+    const enrollment = await tx.get(db.doc(`enrollments/${uid}`));
+    if (enrollment.data()?.approved !== true) {
+      throw Object.assign(new Error('Device is not approved'), {code: 'permission-denied'});
+    }
+    tx.set(db.doc(`devicePush/${uid}`), {
+      token: data.token, notifications_enabled: data.notifications_enabled,
+      agent_version: data.agent_version, updated_at: timestamp()
+    });
+  });
+  return {registered: true};
+}
 function endpointChanged(before, after) {
   return !!after && (before?.token !== after.token || before?.notifications_enabled !== after.notifications_enabled);
 }
@@ -41,4 +57,4 @@ async function dispatch(uid, deps) {
     return 'invalid-token-removed';
   }
 }
-module.exports = {validateRegistration, endpointChanged, makeMessage, dispatch};
+module.exports = {registerEndpoint, validateRegistration, endpointChanged, makeMessage, dispatch};

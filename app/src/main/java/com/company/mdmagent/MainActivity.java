@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.admin.DevicePolicyManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,6 +27,8 @@ public class MainActivity extends Activity {
     private TextView status;
     private Button sync;
     private boolean notificationPermissionRequested = false;
+    private final SharedPreferences.OnSharedPreferenceChangeListener pushStatusListener =
+            (preferences, key) -> runOnUiThread(this::updateIdentityView);
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -119,6 +122,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        getSharedPreferences("push-registration", MODE_PRIVATE)
+                .registerOnSharedPreferenceChangeListener(pushStatusListener);
         requestNotificationPermissionIfNeeded();
         SyncEngine.setStatusListener((inProgress, message) -> {
             if (isDestroyed()) return;
@@ -133,6 +138,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        getSharedPreferences("push-registration", MODE_PRIVATE)
+                .unregisterOnSharedPreferenceChangeListener(pushStatusListener);
         SyncEngine.setStatusListener(null);
         super.onStop();
     }

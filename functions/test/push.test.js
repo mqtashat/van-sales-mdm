@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const {validateRegistration, endpointChanged, makeMessage, dispatch} = require('../push');
+const {registerEndpoint, validateRegistration, endpointChanged, makeMessage, dispatch} = require('../push');
 const token = 'a'.repeat(150);
 const valid = {token, notifications_enabled: true, agent_version: '0.3.0-pilot'};
 test('registration requires auth and strict types and rejects caller selected UID', () => {
@@ -56,4 +56,26 @@ test('invalid token passes exact attempted token for race-safe cleanup', async (
   });
   assert.deepEqual(removed, {uid: 'uid', token});
   assert.equal(outcome, 'invalid-token-removed');
+});
+
+test('actual registration transaction checks approval and writes only authenticated UID', async () => {
+  let approved = false;
+  let written;
+  const db = {
+    doc: path => path,
+    runTransaction: fn => fn({
+      get: async path => { assert.equal(path, 'enrollments/device1'); return {data: () => ({approved})}; },
+      set: (path, value) => {written = {path, value};}
+    })
+  };
+  await assert.rejects(registerEndpoint({uid: 'device1'}, valid, db, () => 123), {code: 'permission-denied'});
+  assert.equal(written, undefined);
+  approved = true;
+  assert.deepEqual(await registerEndpoint({uid: 'device1'}, valid, db, () => 123), {registered: true});
+  assert.deepEqual(written, {path: 'devicePush/device1', value: {...valid, updated_at: 123}});
+});
+test('unauthenticated and forged UID registrations cannot start any transaction', async () => {
+  const db = {runTransaction: () => {throw Error('must not access DB');}};
+  await assert.rejects(registerEndpoint(null, valid, db, () => 0), {code: 'unauthenticated'});
+  await assert.rejects(registerEndpoint({uid: 'own'}, {...valid, uid: 'victim'}, db, () => 0), {code: 'invalid-argument'});
 });
