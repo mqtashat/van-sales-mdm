@@ -9,6 +9,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.UserManager;
+import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 import com.google.android.gms.tasks.Tasks;
 import com.google.firebase.auth.FirebaseAuth;
@@ -23,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.3.0-pilot";
+    static final String AGENT_VERSION = "0.3.1-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -143,7 +145,12 @@ final class SyncEngine {
                 if (ctx == null) {
                     throw new IllegalStateException("Context not initialized");
                 }
-                return sync(ctx, trigger);
+                try {
+                    return sync(ctx, trigger);
+                } catch (Exception ex) {
+                    SyncRecovery.schedule(ctx, ex);
+                    throw ex;
+                }
             },
             (inProgress, message) -> notifyStatus(inProgress, message)
     );
@@ -249,7 +256,11 @@ final class SyncEngine {
      */
     static synchronized String sync(Context context, String trigger) throws Exception {
         String safeTrigger = (trigger != null && !trigger.isEmpty()) ? trigger : "direct";
-        Log.i(TAG, "sync_start: trigger=" + safeTrigger);
+        long startedAt = SystemClock.elapsedRealtime();
+        PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        Log.i(TAG, "sync_start: trigger=" + safeTrigger
+                + " interactive=" + (power != null && power.isInteractive())
+                + " idle=" + (power != null && power.isDeviceIdleMode()));
 
         SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
@@ -296,6 +307,7 @@ final class SyncEngine {
         if (owner) PushRegistration.refresh(context);
         long applied = prefs.getLong(KEY_REVISION, 0);
         String error = "";
+        Exception policyFailure = null;
         String result;
 
         try {
@@ -333,6 +345,7 @@ final class SyncEngine {
                         + " blockedAppsCount=" + policy.blockedApps.size());
             }
         } catch (Exception ex) {
+            policyFailure = ex;
             error = ex.getClass().getSimpleName() + ": " + String.valueOf(ex.getMessage());
             result = "لم تكتمل المزامنة: " + error;
             Log.e(TAG, "sync_apply_error: trigger=" + safeTrigger + " error=" + error);
@@ -360,9 +373,10 @@ final class SyncEngine {
 
         COORDINATOR.setLastStatusMessage(result);
         if (!error.isEmpty()) {
-            throw new IllegalStateException(error);
+            throw policyFailure;
         }
-        Log.i(TAG, "sync_completed_ok: trigger=" + safeTrigger + " appliedRevision=" + applied);
+        Log.i(TAG, "sync_completed_ok: trigger=" + safeTrigger + " appliedRevision=" + applied
+                + " elapsedMs=" + (SystemClock.elapsedRealtime() - startedAt));
         return result;
     }
 }

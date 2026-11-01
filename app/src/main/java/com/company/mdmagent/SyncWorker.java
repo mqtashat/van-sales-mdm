@@ -28,7 +28,8 @@ public class SyncWorker extends Worker {
             Log.w(TAG, "workmanager_sync_failed: attempt=" + attempt
                     + " type=" + ex.getClass().getSimpleName()
                     + " message=" + String.valueOf(ex.getMessage()));
-            return attempt < 3 ? Result.retry() : Result.failure();
+            return SyncRecovery.shouldRetry(ex, attempt) ? Result.retry() : Result.failure();
         }
     }
 }
+

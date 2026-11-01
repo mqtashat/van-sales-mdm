@@ -14,6 +14,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -236,7 +237,7 @@ public class PolicySyncService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
     private FirebaseAuth.AuthStateListener authStateListener;
-    private volatile boolean networkWasLost = false;
+    private final NetworkRecoveryState networkRecovery = new NetworkRecoveryState();
 
     static boolean isRunning() {
         return SESSION.isRunning();
@@ -559,23 +560,26 @@ public class PolicySyncService extends Service {
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
-                if (!SESSION.isRunning()) return;
-                if (!networkWasLost) {
-                    // Initial network callback on registration should not trigger a duplicate sync
-                    return;
+                networkRecovery.available(network);
+                Log.i(TAG, "fgs_network_available: waiting for validation");
+            }
+
+            @Override
+            public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                boolean validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                boolean recovered = networkRecovery.capabilities(network, validated);
+                Log.i(TAG, "fgs_network_capabilities: validated=" + validated + " recovered=" + recovered);
+                if (recovered && SESSION.isRunning()) {
+                    // Includes initial validation, WAN restoration and default-network handover.
+                    // Repeated validated callbacks do not create a sync loop.
+                    SyncEngine.requestSync(getApplicationContext(), "fgs_network_validated");
                 }
-                networkWasLost = false;
-                Log.i(TAG, "fgs_network_restored: scheduling server sync");
-                FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-                if (user != null) {
-                    attachListenersOnMainThread(user.getUid());
-                }
-                SyncEngine.requestSync(getApplicationContext(), "fgs_network_restored");
             }
 
             @Override
             public void onLost(Network network) {
-                networkWasLost = true;
+                networkRecovery.lost(network);
                 Log.i(TAG, "fgs_network_lost: keeping applied restrictions enforced offline");
             }
         };
@@ -626,3 +630,4 @@ public class PolicySyncService extends Service {
         return null;
     }
 }
+

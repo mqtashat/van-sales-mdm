@@ -106,3 +106,25 @@ gradle testDebugUnitTest lintDebug assembleDebug
 يمنع التطبيق إخفاء نفسه ولوحة المفاتيح والهاتف والواجهة الرئيسية وتطبيقات النظام.
 قد تكون YouTube أو Chrome تطبيقات نظام على POVA 5؛ لن نضمن حظرها بهذه النسخة.
 لا تمنع هذه النسخة تثبيت تطبيقات جديدة ولا تطبّق قائمة سماح شاملة. قبل استبدال Family Link بالكامل نحتاج حصر تطبيقاتكم واختبار بقية القيود.
+
+
+
+### Pilot 0.3.1: network recovery experiment
+
+Version code 4; update with the same persistent signing key (no reset). No Firestore schema,
+rules, dashboard or server changes. The foreground service now observes INTERNET + VALIDATED
+transitions, including WAN recovery while Wi-Fi stays associated; stale callbacks from an old
+default network are ignored. Initial validation requests one sync; duplicate validated callbacks
+are deduplicated. Validation is an OS signal, not proof that Firebase is reachable.
+
+Direct sync transport failures schedule one unique connected WorkManager job (30-second minimum
+delay, exponential backoff, at most 3 retries). Workers do not recursively schedule recovery jobs.
+Policy parse/permission errors are not retried. Policy errors retain their original cause after
+status reporting. Logs include screen-interactive/idle state and successful sync duration.
+WorkManager delays are not deadlines. This does not bypass OEM process freezing: device logs
+showed Transsion Hiber freezing the process despite an active systemExempted foreground service.
+
+Acceptance on the physical phone: unplug USB, lock screen, remove WAN internet without dropping
+Wi-Fi association, save a policy, restore WAN without touching phone. Record requested/applied
+revision and latency; repeat after prolonged idle and reboot. A passing CI build is not proof
+that this physical-device scenario passes. Keep the previous APK for comparison.
