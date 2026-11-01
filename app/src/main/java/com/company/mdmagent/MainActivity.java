@@ -45,7 +45,7 @@ public class MainActivity extends Activity {
 
         TextView description = new TextView(this);
         description.setText(
-                "نسخة اختبار لجهاز واحد (0.2.0-pilot): منع مشاركة الإنترنت وحظر تطبيقات محمّلة تحددها الإدارة، بعد اعتماد الجهاز وتفعيل Device Owner. لا تمسح البيانات ولا تزيل Family Link. تطبيقات النظام محمية في هذه التجربة.\n\n"
+                "نسخة اختبار لجهاز واحد (0.3.0-pilot): منع مشاركة الإنترنت وحظر تطبيقات محمّلة تحددها الإدارة، بعد اعتماد الجهاز وتفعيل Device Owner. لا تمسح البيانات ولا تزيل Family Link. تطبيقات النظام محمية في هذه التجربة.\n\n"
                 + "ترسل: نوع الجهاز، إصدار أندرويد، البطارية، حالة الصلاحية والسياسة ووقت المزامنة. لا تجمع موقعًا أو صورًا أو جهات اتصال.\n"
         );
         box.addView(description);
@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
         note.setText(
                 "\nطريقة المزامنة بالخلفية:\n"
                 + "• بعد تفعيل Device Owner وتسجيل الجهاز واعتماده في Firebase، يشغّل التطبيق خدمة أمامية («إدارة جهاز الشركة نشطة») للاستماع لتحديثات السياسة والتحقق منها من الخادم عبر SyncEngine.\n"
+                + "• تصل تنبيهات تحديث السياسة عبر FCM بعد تسجيل الجهاز ونشر وظائف الخادم؛ التنبيه ليس تأكيدًا للتطبيق.\n"
                 + "• يبقى WorkManager الدوري (كل 15 دقيقة أو أكثر بحسب النظام) مسارًا احتياطيًا، مع استعادة الخدمة بعد إعادة تشغيل الهاتف ضمن قيود أندرويد.\n"
                 + "• يظل استقبال التحديثات بالخلفية معتمدًا على توفر الإنترنت وسياسات نظام الهاتف لتوفير الطاقة، بينما تبقى القيود المطبقة سارية حتى دون إنترنت.\n"
                 + "• لا توجد أزرار محلية لفك القيود؛ المسؤول يغيّر السياسة في Firebase."
@@ -158,6 +159,7 @@ public class MainActivity extends Activity {
                     && grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED;
             Log.i(TAG, "ui_post_notifications_permission: granted=" + granted);
+            PushRegistration.refresh(this);
             updateIdentityView();
         }
     }
@@ -202,7 +204,9 @@ public class MainActivity extends Activity {
         identity.setText(
                 "Device Owner: " + ownerText
                 + "\nخدمة المزامنة بالخلفية: " + serviceStatus
+                + "\nاستقبال FCM: " + PushRegistration.status(this)
                 + "\nUID:\n" + uid + "\n"
         );
     }
 }
+

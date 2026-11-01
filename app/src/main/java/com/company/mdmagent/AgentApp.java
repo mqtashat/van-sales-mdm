@@ -3,6 +3,7 @@ package com.company.mdmagent;
 import android.app.Application;
 import android.content.Context;
 import android.util.Log;
+import com.google.firebase.auth.FirebaseAuth;
 import androidx.work.BackoffPolicy;
 import androidx.work.Constraints;
 import androidx.work.ExistingPeriodicWorkPolicy;
@@ -25,6 +26,13 @@ public class AgentApp extends Application {
     public void onCreate() {
         super.onCreate();
         schedulePeriodicSync(this);
+        // Restore after Firebase has loaded its persisted identity, not only at BOOT_COMPLETED.
+        // The same path also runs when FCM cold-starts this process. No anonymous account is created here.
+        FirebaseAuth.getInstance().addAuthStateListener(auth -> {
+            if (auth.getCurrentUser() != null && PolicySyncService.canRunForegroundService(this)) {
+                PolicySyncService.ensureStarted(this, "auth_restored");
+            }
+        });
     }
 
     static void schedulePeriodicSync(Context context) {
@@ -59,3 +67,4 @@ public class AgentApp extends Application {
         Log.i(TAG, "workmanager_onetime_enqueued: reason=" + reason);
     }
 }
+

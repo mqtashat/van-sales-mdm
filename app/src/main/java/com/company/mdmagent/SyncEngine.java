@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.2.0-pilot";
+    static final String AGENT_VERSION = "0.3.0-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -293,6 +293,7 @@ final class SyncEngine {
         DevicePolicyManager dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
         ComponentName admin = new ComponentName(context, AdminReceiver.class);
         boolean owner = dpm != null && dpm.isDeviceOwnerApp(context.getPackageName());
+        if (owner) PushRegistration.refresh(context);
         long applied = prefs.getLong(KEY_REVISION, 0);
         String error = "";
         String result;
@@ -365,3 +366,4 @@ final class SyncEngine {
         return result;
     }
 }
+

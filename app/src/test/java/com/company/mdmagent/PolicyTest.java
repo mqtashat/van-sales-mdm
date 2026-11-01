@@ -303,4 +303,16 @@ public class PolicyTest {
         assertNull(session.onDestroyed());
         assertEquals(2, removed.get());
     }
+    @Test
+    public void pushHintMustMatchSignedInDeviceAndContainsNoEnforcementAuthority() {
+        Map<String, String> hint = new HashMap<>();
+        hint.put("type", "policy_sync");
+        hint.put("uid", "device1");
+        assertTrue(PolicyMessagingService.validHint(hint, "device1"));
+        assertFalse(PolicyMessagingService.validHint(hint, "device2"));
+        assertFalse(PolicyMessagingService.validHint(hint, null));
+        hint.put("type", "unlock");
+        assertFalse(PolicyMessagingService.validHint(hint, "device1"));
+    }
 }
+

@@ -88,3 +88,30 @@ jobs:
       - run: npm install --prefix tests --ignore-scripts --no-audit --no-fund
       - name: Test Firebase authorization rules locally
         run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-mdm "npm --prefix tests test"
+
+
+  push-functions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --prefix functions --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix functions test
+      - name: Verify function exports load
+        env:
+          GCLOUD_PROJECT: demo-mdm
+        run: node -e "const f=require('./functions'); for(const n of ['registerMdmPush','mdmPolicyChanged','mdmEnrollmentChanged','mdmPushRegistered']) if(typeof f[n] !== 'function') throw Error(n)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: injaz-mdm-push-server
+          path: |
+            functions/*.js
+            functions/package*.json
+            functions/test/*.js
+            firebase.push.json
+            PUSH-SETUP.md
+          if-no-files-found: error
+          retention-days: 14
