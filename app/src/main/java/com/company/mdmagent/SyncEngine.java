@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.3.1-pilot";
+    static final String AGENT_VERSION = "0.3.2-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -376,25 +376,39 @@ final class SyncEngine {
                 result = "الجهاز معتمد؛ لم تُنشأ سياسة بعد. لا تغيير في القيود.";
                 Log.i(TAG, "sync_no_policy_doc: trigger=" + safeTrigger + " appliedRevision=" + applied);
             } else {
-                Policy policy = Policy.parse(snapshot.getData(), applied);
+                Policy policy = Policy.parse(snapshot.getData(), Math.max(applied, prefs.getLong("accepted_revision", 0)));
                 if (!owner) {
                     throw new IllegalStateException("Device Owner غير مفعّل؛ لم تطبّق السياسة.");
                 }
-                AppRestrictions.apply(context, dpm, admin, policy.blockedApps, prefs);
-                if (policy.blockTethering) {
-                    dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING);
-                } else {
-                    dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING);
+                // Remember newest accepted revision even if some components fail: never replay older policy.
+                if (!prefs.edit().putLong("accepted_revision", policy.revision).commit()) {
+                    throw new IllegalStateException("تعذر حفظ إصدار السياسة؛ لم تُنفذ تغييرات جديدة");
                 }
+                PolicyApplication.Result execution = PolicyApplication.apply(() -> {
+                    if (policy.blockTethering) {
+                        dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING);
+                    } else {
+                        dpm.clearUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING);
+                    }
+                    if (dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING) != policy.blockTethering) {
+                        throw new IllegalStateException("تعذر التحقق من تطبيق القيد");
+                    }
+                }, () -> AppRestrictions.apply(context, dpm, admin, policy.blockedApps, prefs));
                 boolean actual = dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING);
-                if (actual != policy.blockTethering) {
-                    throw new IllegalStateException("تعذر التحقق من تطبيق القيد.");
+                if (!execution.complete()) {
+                    // Keep applied_revision at the last completely confirmed revision.
+                    // Existing error field communicates partial application without changing Firestore schema.
+                    throw new IllegalStateException("لم تكتمل السياسة #" + policy.revision
+                            + "; مشاركة الإنترنت " + (actual ? "ممنوعة" : "غير ممنوعة بقيد إنجاز")
+                            + "; " + execution.error());
+                }
+                if (!prefs.edit().putLong(KEY_REVISION, policy.revision).commit()) {
+                    throw new IllegalStateException("تعذر حفظ تأكيد اكتمال السياسة");
                 }
                 applied = policy.revision;
-                prefs.edit().putLong(KEY_REVISION, applied).apply();
                 result = actual
-                        ? "تم التحقق: مشاركة الإنترنت ممنوعة."
-                        : "تم التحقق: أزيل منع المشاركة الخاص بتطبيقنا.";
+                        ? "تم التحقق: مشاركة الإنترنت ممنوعة والتطبيقات المطلوبة عولجت."
+                        : "تم التحقق: أزيل منع المشاركة الخاص بتطبيقنا والتطبيقات المطلوبة عولجت.";
                 Log.i(TAG, "sync_policy_applied: trigger=" + safeTrigger
                         + " revision=" + applied
                         + " blockTethering=" + actual
@@ -436,4 +450,3 @@ final class SyncEngine {
         return result;
     }
 }
-
