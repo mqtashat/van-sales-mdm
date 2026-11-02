@@ -60,6 +60,14 @@ public class PolicySyncService extends Service {
         ListenerHandle attachPolicyListener(String uid);
     }
 
+    interface AuthStateCallback {
+        void onAuthStateChanged(String currentUid);
+    }
+
+    interface AuthStateRegistrar {
+        ListenerHandle register(AuthStateCallback callback);
+    }
+
     static final class StartCommandPlan {
         final boolean shouldStop;
         final boolean promoteBeforeStop;
@@ -92,6 +100,8 @@ public class PolicySyncService extends Service {
         private String listenerUid = null;
         private ListenerHandle enrollmentHandle = null;
         private ListenerHandle policyHandle = null;
+        private boolean enrollmentInitialSnapshotSeen = false;
+        private boolean policyInitialSnapshotSeen = false;
         private String initialSyncSatisfiedUid = null;
         private boolean restartAfterStop = false;
         private String restartTrigger = null;
@@ -184,8 +194,56 @@ public class PolicySyncService extends Service {
             }
             detachListenersInternal();
             listenerUid = uid;
+            enrollmentInitialSnapshotSeen = false;
+            policyInitialSnapshotSeen = false;
             enrollmentHandle = factory.attachEnrollmentListener(uid);
             policyHandle = factory.attachPolicyListener(uid);
+            return true;
+        }
+
+        /**
+         * Evaluates whether an enrollment listener snapshot should trigger a server sync.
+         * Suppresses the initial snapshot when enrollment is already approved and initial sync is
+         * already satisfied/scheduled, avoiding redundant syncs upon listener registration.
+         */
+        synchronized boolean onEnrollmentSnapshot(String uid, boolean fromCache, boolean approvedNow) {
+            if (state != LifecycleState.RUNNING || fromCache || uid == null || !uid.equals(listenerUid)) {
+                return false;
+            }
+            if (!enrollmentInitialSnapshotSeen) {
+                enrollmentInitialSnapshotSeen = true;
+                // If approval was revoked on the server before listener attached, must sync immediately.
+                // If still approved, initial sync is already handled by onStartCommand or verified sync.
+                return !approvedNow;
+            }
+            return true;
+        }
+
+        /**
+         * Evaluates whether a policy listener snapshot should trigger a server sync.
+         * Suppresses the initial snapshot upon listener registration when its revision already
+         * matches the applied revision (or when the initial sync for this session is already running),
+         * while immediately syncing if the server revision differs or on any subsequent change.
+         */
+        synchronized boolean onPolicySnapshot(
+                String uid,
+                boolean fromCache,
+                boolean snapshotExists,
+                Long snapshotRevision,
+                long appliedRevision
+        ) {
+            if (state != LifecycleState.RUNNING || fromCache || uid == null || !uid.equals(listenerUid)) {
+                return false;
+            }
+            if (!policyInitialSnapshotSeen) {
+                policyInitialSnapshotSeen = true;
+                if (!uid.equals(initialSyncSatisfiedUid)) {
+                    return true;
+                }
+                boolean matchesApplied = (!snapshotExists && appliedRevision == 0L)
+                        || (snapshotExists && snapshotRevision != null && snapshotRevision == appliedRevision);
+                return !matchesApplied;
+            }
             return true;
         }
 
@@ -203,6 +261,8 @@ public class PolicySyncService extends Service {
                 policyHandle = null;
             }
             listenerUid = null;
+            enrollmentInitialSnapshotSeen = false;
+            policyInitialSnapshotSeen = false;
         }
 
         synchronized boolean markStopping() {
@@ -232,11 +292,43 @@ public class PolicySyncService extends Service {
         }
     }
 
+    private static final AuthStateRegistrar DEFAULT_AUTH_REGISTRAR = callback -> {
+        FirebaseAuth auth = FirebaseAuth.getInstance();
+        FirebaseAuth.AuthStateListener listener = firebaseAuth -> {
+            FirebaseUser user = firebaseAuth.getCurrentUser();
+            callback.onAuthStateChanged(user != null ? user.getUid() : null);
+        };
+        auth.addAuthStateListener(listener);
+        return () -> auth.removeAuthStateListener(listener);
+    };
+
     static final ServiceSessionController SESSION = new ServiceSessionController();
+    private static volatile ListenerFactory listenerFactoryOverrideForTest;
+    private static volatile AuthStateRegistrar authRegistrarOverrideForTest;
+
+    static void setListenerFactoryOverrideForTest(ListenerFactory factory) {
+        listenerFactoryOverrideForTest = factory;
+    }
+
+    static void setAuthRegistrarOverrideForTest(AuthStateRegistrar registrar) {
+        authRegistrarOverrideForTest = registrar;
+    }
+
+    static boolean onEnrollmentSnapshotReceived(Context context, String targetUid, boolean fromCache, boolean approvedNow) {
+        if (!SESSION.isRunning()) return false;
+        if (!SESSION.onEnrollmentSnapshot(targetUid, fromCache, approvedNow)) {
+            return false;
+        }
+        Log.i(TAG, "fgs_enrollment_snapshot_server: approved=" + approvedNow);
+        if (context != null) {
+            SyncEngine.requestSync(context.getApplicationContext(), "fgs_enrollment_snapshot");
+        }
+        return true;
+    }
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
-    private FirebaseAuth.AuthStateListener authStateListener;
+    private ListenerHandle authListenerHandle;
     private final NetworkRecoveryState networkRecovery = new NetworkRecoveryState();
 
     static boolean isRunning() {
@@ -259,8 +351,7 @@ public class PolicySyncService extends Service {
     static boolean canRunForegroundService(Context context) {
         if (context == null) return false;
         boolean isOwner = isDeviceOwnerActive(context);
-        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        String currentUid = user != null ? user.getUid() : null;
+        String currentUid = SyncEngine.getCurrentAuthenticatedUid();
         SharedPreferences prefs = context.getSharedPreferences(SyncEngine.PREFS_NAME, Context.MODE_PRIVATE);
         boolean approvedVerified = prefs.getBoolean(SyncEngine.KEY_APPROVED_VERIFIED, false);
         String approvedUid = prefs.getString(SyncEngine.KEY_APPROVED_UID, "");
@@ -296,8 +387,7 @@ public class PolicySyncService extends Service {
 
     static String describeEligibility(Context context) {
         boolean owner = isDeviceOwnerActive(context);
-        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        String uid = user != null ? user.getUid() : null;
+        String uid = SyncEngine.getCurrentAuthenticatedUid();
         boolean hasUser = uid != null && !uid.isEmpty();
         boolean approved = hasUser && SyncEngine.isDeviceApproved(context, uid);
         return "deviceOwner=" + owner + ", firebaseUser=" + hasUser + ", approved=" + approved
@@ -325,8 +415,7 @@ public class PolicySyncService extends Service {
         if (context == null) return;
         Context appContext = context.getApplicationContext();
         boolean eligible = canRunForegroundService(appContext);
-        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        String uid = user != null ? user.getUid() : null;
+        String uid = SyncEngine.getCurrentAuthenticatedUid();
 
         if (!SESSION.requestEnsureStarted(eligible, uid, trigger, syncAlreadyVerified)) {
             if (!eligible) {
@@ -386,8 +475,7 @@ public class PolicySyncService extends Service {
         boolean isStopAction = ACTION_STOP.equals(action);
         boolean isOwner = isDeviceOwnerActive(this);
         boolean fullEligible = canRunForegroundService(this);
-        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        String uid = user != null ? user.getUid() : null;
+        String uid = SyncEngine.getCurrentAuthenticatedUid();
 
         StartCommandPlan plan = SESSION.onStartCommand(isOwner, fullEligible, uid, isStopAction);
         if (plan.shouldStop) {
@@ -481,8 +569,10 @@ public class PolicySyncService extends Service {
     }
 
     private void attachListenersInternal(String uid) {
-        final FirebaseFirestore db = FirebaseFirestore.getInstance();
-        boolean attachedNew = SESSION.attachListenersIfNeeded(uid, new ListenerFactory() {
+        ListenerFactory override = listenerFactoryOverrideForTest;
+        ListenerFactory factory = override != null ? override : new ListenerFactory() {
+            private final FirebaseFirestore db = FirebaseFirestore.getInstance();
+
             @Override
             public ListenerHandle attachEnrollmentListener(String targetUid) {
                 final ListenerRegistration reg = db.collection("enrollments").document(targetUid)
@@ -496,12 +586,12 @@ public class PolicySyncService extends Service {
                                 }
                                 return;
                             }
-                            if (snapshot == null || snapshot.getMetadata().isFromCache()) {
+                            if (snapshot == null) {
                                 return;
                             }
+                            boolean fromCache = snapshot.getMetadata().isFromCache();
                             boolean approvedNow = snapshot.exists() && Boolean.TRUE.equals(snapshot.getBoolean("approved"));
-                            Log.i(TAG, "fgs_enrollment_snapshot_server: approved=" + approvedNow);
-                            SyncEngine.requestSync(getApplicationContext(), "fgs_enrollment_snapshot");
+                            onEnrollmentSnapshotReceived(getApplicationContext(), targetUid, fromCache, approvedNow);
                         });
                 return reg::remove;
             }
@@ -519,7 +609,17 @@ public class PolicySyncService extends Service {
                                 }
                                 return;
                             }
-                            if (snapshot == null || snapshot.getMetadata().isFromCache()) {
+                            if (snapshot == null) {
+                                return;
+                            }
+                            boolean fromCache = snapshot.getMetadata().isFromCache();
+                            boolean exists = snapshot.exists();
+                            Long snapshotRev = (exists && snapshot.get("revision") instanceof Long)
+                                    ? snapshot.getLong("revision")
+                                    : null;
+                            long appliedRev = getSharedPreferences(SyncEngine.PREFS_NAME, Context.MODE_PRIVATE)
+                                    .getLong(SyncEngine.KEY_REVISION, 0);
+                            if (!SESSION.onPolicySnapshot(targetUid, fromCache, exists, snapshotRev, appliedRev)) {
                                 return;
                             }
                             // Never apply policy data directly from snapshot or cache; trigger SyncEngine server verification
@@ -528,30 +628,32 @@ public class PolicySyncService extends Service {
                         });
                 return reg::remove;
             }
-        });
+        };
+        boolean attachedNew = SESSION.attachListenersIfNeeded(uid, factory);
         if (attachedNew) {
             Log.i(TAG, "fgs_listeners_attached");
         }
     }
 
     private void registerAuthListener() {
-        authStateListener = firebaseAuth -> {
+        AuthStateRegistrar registrar = authRegistrarOverrideForTest != null
+                ? authRegistrarOverrideForTest
+                : DEFAULT_AUTH_REGISTRAR;
+        authListenerHandle = registrar.register(currentUid -> {
             if (!SESSION.isRunning()) return;
-            FirebaseUser user = firebaseAuth.getCurrentUser();
-            if (user == null) {
+            if (currentUid == null || currentUid.isEmpty()) {
                 Log.w(TAG, "fgs_auth_state_signed_out: stopping service");
                 stopForegroundAndSelf("auth_signed_out");
-            } else if (!SESSION.hasActiveListenersFor(user.getUid())) {
+            } else if (!SESSION.hasActiveListenersFor(currentUid)) {
                 Log.i(TAG, "fgs_auth_state_uid_changed: re-evaluating eligibility");
                 if (canRunForegroundService(PolicySyncService.this)) {
-                    attachListenersOnMainThread(user.getUid());
+                    attachListenersOnMainThread(currentUid);
                     SyncEngine.requestSync(getApplicationContext(), "fgs_auth_uid_changed");
                 } else {
                     stopForegroundAndSelf("auth_uid_not_approved");
                 }
             }
-        };
-        FirebaseAuth.getInstance().addAuthStateListener(authStateListener);
+        });
     }
 
     private void registerNetworkCallback() {
@@ -603,9 +705,9 @@ public class PolicySyncService extends Service {
 
     @Override
     public void onDestroy() {
-        if (authStateListener != null) {
-            FirebaseAuth.getInstance().removeAuthStateListener(authStateListener);
-            authStateListener = null;
+        if (authListenerHandle != null) {
+            authListenerHandle.remove();
+            authListenerHandle = null;
         }
         if (networkCallback != null) {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
