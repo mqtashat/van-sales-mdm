@@ -22,7 +22,14 @@ public class KioskActivity extends Activity {
     }
     @Override protected void onResume(){super.onResume();render();}
     private void render(){
-        if(!KioskController.enabled(this)){finish();return;}
+        if(!KioskController.enabled(this)){
+            if(KioskController.prefs(this).getBoolean("managed",false))showError("لم تكتمل إعادة التفعيل؛ يمكنك إعادة المحاولة أو دخول الصيانة");
+            else finish();
+            return;
+        }
+        if(KioskController.prefs(this).contains("requested_enabled")&&!KioskController.prefs(this).getBoolean("requested_enabled",false)){
+            showError("لم يكتمل تعطيل شاشة الشركة؛ أعد المزامنة أو ادخل صيانة المدير");return;
+        }
         if(!KioskController.dpm(this).isLockTaskPermitted(getPackageName())){showError("تعذر تفعيل قفل الشاشة؛ تواصل مع الإدارة");return;}
         try {if(!KioskController.locked(this))startLockTask();}
         catch(RuntimeException ex){KioskController.lockFailed(this,ex);KioskController.queueStatus(this);showError("تعذر بدء قفل شاشة الشركة: "+ex.getMessage());return;}
@@ -62,7 +69,17 @@ public class KioskActivity extends Activity {
         scroll.requestApplyInsets();
         AgentApp.SYNC.execute(()->{try{String uid=SyncEngine.getCurrentAuthenticatedUid();if(uid!=null&&SyncEngine.isDeviceApproved(this,uid))KioskController.publishStatus(this,com.google.firebase.firestore.FirebaseFirestore.getInstance(),uid,KioskController.prefs(this).getString("last_error",""));}catch(Exception ex){android.util.Log.w(SyncEngine.TAG,"kiosk_ui_status_failed",ex);}});
     }
-    private void showError(String message){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);TextView t=new TextView(this);t.setText(message);root.addView(t);Button b=new Button(this);b.setText("صيانة المدير");b.setOnClickListener(v->maintenance());root.addView(b);setContentView(root);}
+    private void showError(String message){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);TextView t=new TextView(this);t.setText(message);root.addView(t);Button b=new Button(this);b.setText("صيانة المدير");b.setOnClickListener(v->maintenance());root.addView(b);
+        Button refresh=new Button(this);refresh.setText("مزامنة والتحقق الآن");refresh.setOnClickListener(v->SyncEngine.requestSync(this,"kiosk_retry"));root.addView(refresh);
+        if(KioskController.inMaintenance(this)){
+            Button resume=new Button(this);resume.setText("إنهاء الصيانة والعودة لشاشة الشركة");root.addView(resume);
+            resume.setOnClickListener(v->{resume.setEnabled(false);KioskController.LOCAL.execute(()->{
+                try{KioskController.resumeMaintenance(getApplicationContext(),SyncEngine.getCurrentAuthenticatedUid());runOnUiThread(this::render);}
+                catch(Exception ex){runOnUiThread(()->{resume.setEnabled(true);t.setText(KioskController.errorText(ex));});}
+                KioskController.queueStatus(getApplicationContext());
+            });});
+        }
+        setContentView(root);}
     private void maintenance(){
         EditText password=new EditText(this);password.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         password.setHint("كلمة مرور صيانة هذا الجهاز");

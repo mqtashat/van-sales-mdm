@@ -47,7 +47,7 @@ final class KioskController {
         requireSave(p.edit().putLong("accepted_revision",policy.revision).putBoolean("requested_enabled",policy.enabled)
                 .putStringSet("apps",new HashSet<>(policy.apps)).putString("exit_salt",policy.salt).putString("exit_hash",policy.hash).commit());
         if(!policy.enabled) {
-            requireSave(p.edit().putLong("recovery_revision",0).putBoolean("enabled",false).commit());
+            requireSave(p.edit().putLong("recovery_revision",0).commit());
             try { disable(c); requireSave(p.edit().putLong("configured_revision",policy.revision).putString("last_error","").commit()); }
             catch(RuntimeException ex) { recordError(c,ex); throw ex; }
             return;
@@ -76,7 +76,8 @@ final class KioskController {
     }
     static synchronized void confirmLocked(Context c) {
         SharedPreferences p=prefs(c);DevicePolicyManager d=dpm(c);ComponentName a=admin(c);
-        if(!enabled(c)||inMaintenance(c)||!locked(c)||!d.isDeviceOwnerApp(c.getPackageName()))throw new IllegalStateException("لم يتم تأكيد قفل شاشة الشركة");
+        if(!p.getBoolean("requested_enabled",false)||p.getLong("prepared_revision",0)!=p.getLong("accepted_revision",0)
+                ||!enabled(c)||inMaintenance(c)||!locked(c)||!d.isDeviceOwnerApp(c.getPackageName()))throw new IllegalStateException("لم يتم تأكيد قفل شاشة الشركة");
         for(String r:RESTRICTIONS)if(!d.getUserRestrictions(a).getBoolean(r))throw new IllegalStateException("قيد غير مطبق: "+r);
         requireSave(p.edit().putLong("configured_revision",p.getLong("accepted_revision",0)).remove("resume_recovery_revision").putString("last_error","").commit());
     }
@@ -116,6 +117,7 @@ final class KioskController {
         d.addPersistentPreferredActivity(a,homeFilter(),new ComponentName(c,KioskActivity.class));
         if (!new HashSet<>(Arrays.asList(d.getLockTaskPackages(a))).equals(list)) throw new IllegalStateException("تعذر تأكيد التطبيقات المسموحة");
         for(String r:RESTRICTIONS) if(!d.getUserRestrictions(a).getBoolean(r)) throw new IllegalStateException("تعذر تأكيد قيد شاشة الشركة: "+r);
+        requireSave(p.edit().putLong("prepared_revision",policy.revision).commit());
         if(locked(c))confirmLocked(c); // otherwise KioskActivity confirms the actual lock after startLockTask
         // Avoid stealing focus from allowed work apps during every background sync.
         if(!locked(c))open(c);

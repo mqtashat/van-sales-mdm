@@ -5,6 +5,10 @@ import android.app.admin.DevicePolicyManager;
 import android.content.*;
 import android.content.pm.*;
 import android.os.UserManager;
+import android.os.Bundle;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
+import org.robolectric.shadows.ShadowDevicePolicyManager;
 import org.junit.*;
 import org.junit.runner.RunWith;
 import org.robolectric.*;
@@ -13,8 +17,16 @@ import java.util.*;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest=Config.NONE,sdk=34)
+@Config(manifest=Config.NONE,sdk=34,shadows=KioskResumeTest.RestrictionsShadow.class)
 public class KioskResumeTest {
+    // Robolectric 4.14 writes DPM restrictions into ShadowUserManager but does not implement
+    // DPM.getUserRestrictions. Bridge that read to the actual state recorded by its add/clear APIs.
+    @Implements(DevicePolicyManager.class)
+    public static class RestrictionsShadow extends ShadowDevicePolicyManager {
+        @Implementation protected Bundle getUserRestrictions(ComponentName admin) {
+            return ((UserManager)RuntimeEnvironment.getApplication().getSystemService(Context.USER_SERVICE)).getUserRestrictions();
+        }
+    }
     Application c; DevicePolicyManager d; ComponentName admin;
     final String pkg="com.company.salesapp";
     @Before public void setup(){
