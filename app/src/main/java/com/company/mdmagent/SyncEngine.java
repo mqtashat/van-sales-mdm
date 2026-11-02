@@ -59,11 +59,16 @@ final class SyncEngine {
         private boolean pending = false;
         private String pendingTrigger = "";
         private String lastStatusMessage = "";
+        private volatile Runnable completionHookForTest = null;
 
         QueueCoordinator(SyncExecutor executor, SyncAction action, StatusListener statusCallback) {
             this.executor = executor;
             this.action = action;
             this.statusCallback = statusCallback;
+        }
+
+        void setCompletionHookForTest(Runnable hook) {
+            this.completionHookForTest = hook;
         }
 
         boolean isRunning() {
@@ -119,6 +124,10 @@ final class SyncEngine {
                 final String completedMessage = message != null ? message : "";
                 synchronized (lock) {
                     lastStatusMessage = completedMessage;
+                    Runnable hook = completionHookForTest;
+                    if (hook != null) {
+                        hook.run();
+                    }
                     if (pending) {
                         currentTrigger = pendingTrigger;
                         pending = false;
@@ -135,8 +144,55 @@ final class SyncEngine {
         }
     }
 
+    static final class EnrollmentRecord {
+        final boolean exists;
+        final Boolean approved;
+
+        EnrollmentRecord(boolean exists, Boolean approved) {
+            this.exists = exists;
+            this.approved = approved;
+        }
+    }
+
+    interface ServerEnrollmentProvider {
+        String getCurrentUid();
+        EnrollmentRecord fetchServerEnrollment(String uid) throws Exception;
+    }
+
+    private static final ServerEnrollmentProvider DEFAULT_ENROLLMENT_PROVIDER = new ServerEnrollmentProvider() {
+        @Override
+        public String getCurrentUid() {
+            FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
+            return user != null ? user.getUid() : null;
+        }
+
+        @Override
+        public EnrollmentRecord fetchServerEnrollment(String uid) throws Exception {
+            DocumentSnapshot enrollment = Tasks.await(
+                    FirebaseFirestore.getInstance().collection("enrollments").document(uid).get(Source.SERVER),
+                    25,
+                    TimeUnit.SECONDS
+            );
+            return new EnrollmentRecord(enrollment.exists(), enrollment.getBoolean("approved"));
+        }
+    };
+
+    private static volatile ServerEnrollmentProvider enrollmentProvider = DEFAULT_ENROLLMENT_PROVIDER;
     private static volatile StatusListener statusListener;
+    private static volatile StatusListener directStatusListenerForTest;
     private static volatile Context activeAppContext;
+
+    static void setEnrollmentProviderForTest(ServerEnrollmentProvider provider) {
+        enrollmentProvider = provider != null ? provider : DEFAULT_ENROLLMENT_PROVIDER;
+    }
+
+    static void setDirectStatusListenerForTest(StatusListener listener) {
+        directStatusListenerForTest = listener;
+    }
+
+    static String getCurrentAuthenticatedUid() {
+        return enrollmentProvider.getCurrentUid();
+    }
 
     private static final QueueCoordinator COORDINATOR = new QueueCoordinator(
             command -> AgentApp.SYNC.execute(command),
@@ -238,6 +294,10 @@ final class SyncEngine {
     }
 
     private static void notifyStatus(boolean inProgress, String message) {
+        StatusListener direct = directStatusListenerForTest;
+        if (direct != null) {
+            direct.onSyncStatusUpdated(inProgress, message);
+        }
         postToMainThread(() -> {
             StatusListener current = statusListener;
             if (current != null) {
@@ -263,8 +323,9 @@ final class SyncEngine {
                 + " idle=" + (power != null && power.isDeviceIdleMode()));
 
         SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
-        if (user == null) {
+        ServerEnrollmentProvider provider = enrollmentProvider;
+        String uid = provider.getCurrentUid();
+        if (uid == null || uid.isEmpty()) {
             recordApprovalState(prefs, null, false);
             PolicySyncService.stopIfRunning(context, "sync_unauthenticated");
             Log.w(TAG, "sync_skip_unauthenticated: trigger=" + safeTrigger);
@@ -273,15 +334,9 @@ final class SyncEngine {
             return msg;
         }
 
-        FirebaseFirestore db = FirebaseFirestore.getInstance();
-        String uid = user.getUid();
-        DocumentSnapshot enrollment;
+        EnrollmentRecord enrollment;
         try {
-            enrollment = Tasks.await(
-                    db.collection("enrollments").document(uid).get(Source.SERVER),
-                    25,
-                    TimeUnit.SECONDS
-            );
+            enrollment = provider.fetchServerEnrollment(uid);
         } catch (Exception ex) {
             Log.w(TAG, "sync_enrollment_check_failed: trigger=" + safeTrigger
                     + " type=" + ex.getClass().getSimpleName()
@@ -289,7 +344,7 @@ final class SyncEngine {
             throw ex;
         }
 
-        if (!enrollment.exists() || !Boolean.TRUE.equals(enrollment.getBoolean("approved"))) {
+        if (enrollment == null || !enrollment.exists || !Boolean.TRUE.equals(enrollment.approved)) {
             recordApprovalState(prefs, uid, false);
             PolicySyncService.stopIfRunning(context, "enrollment_not_approved");
             Log.w(TAG, "sync_unapproved: enrollment missing or false, trigger=" + safeTrigger);
@@ -300,6 +355,7 @@ final class SyncEngine {
 
         // Server confirmed enrollment approval
         recordApprovalState(prefs, uid, true);
+        FirebaseFirestore db = FirebaseFirestore.getInstance();
 
         DevicePolicyManager dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
         ComponentName admin = new ComponentName(context, AdminReceiver.class);
