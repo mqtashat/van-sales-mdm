@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.3.2-pilot";
+    static final String AGENT_VERSION = "0.4.0-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -419,6 +419,14 @@ final class SyncEngine {
             error = ex.getClass().getSimpleName() + ": " + String.valueOf(ex.getMessage());
             result = "لم تكتمل المزامنة: " + error;
             Log.e(TAG, "sync_apply_error: trigger=" + safeTrigger + " error=" + error);
+        }
+
+        if (owner) {
+            // Optional features cannot prevent the existing tethering/app policy or its status upload.
+            String kioskError = KioskController.synchronize(context, db, uid);
+            if (!kioskError.isEmpty()) Log.w(TAG, "kiosk_sync: " + kioskError);
+            try { DeviceInventory.publish(context, db, uid); }
+            catch (Exception inventoryError) { Log.w(TAG, "inventory_upload_failed", inventoryError); }
         }
 
         Map<String, Object> state = new HashMap<>();

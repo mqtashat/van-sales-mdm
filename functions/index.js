@@ -59,3 +59,6 @@ exports.mdmPushRegistered = onDocumentWritten({...options, document: 'devicePush
   // Updating heartbeat/agent_version does not generate an endless sync/register/push loop.
   if (endpointChanged(event.data?.before.data(), event.data?.after.data())) await wake(event);
 });
+
+
+exports.mdmKioskChanged = onDocumentWritten({...options, document: 'kioskPolicies/{uid}', retry: true}, wake);

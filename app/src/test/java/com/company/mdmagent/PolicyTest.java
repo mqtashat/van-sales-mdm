@@ -613,3 +613,4 @@ public class PolicyTest {
         assertFalse(PolicyMessagingService.validHint(hint, "device1"));
     }
 }
+

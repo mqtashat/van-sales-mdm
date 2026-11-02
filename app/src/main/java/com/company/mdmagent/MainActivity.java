@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        if (KioskController.enabled(this)) { KioskController.open(this); finish(); return; }
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(32, 64, 32, 32);
@@ -48,7 +49,7 @@ public class MainActivity extends Activity {
 
         TextView description = new TextView(this);
         description.setText(
-                "نسخة اختبار لجهاز واحد (0.3.2-pilot): منع مشاركة الإنترنت وإخفاء التطبيقات التي تحددها الإدارة، بما فيها التطبيقات المثبتة مسبقًا غير الأساسية. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات ولا يلغي إشراف Family Link. تعذر حظر تطبيق لا يوقف تنفيذ بقية السياسة.\n\n"
+                "نسخة اختبار لجهاز واحد (0.4.0-pilot): منع مشاركة الإنترنت وإخفاء التطبيقات التي تحددها الإدارة، بما فيها التطبيقات المثبتة مسبقًا غير الأساسية. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات ولا يلغي إشراف Family Link. تعذر حظر تطبيق لا يوقف تنفيذ بقية السياسة.\n\n"
                 + "ترسل: نوع الجهاز، إصدار أندرويد، البطارية، حالة الصلاحية والسياسة ووقت المزامنة. لا تجمع موقعًا أو صورًا أو جهات اتصال.\n"
         );
         box.addView(description);
@@ -122,6 +123,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        if (KioskController.enabled(this)) { KioskController.open(this); finish(); return; }
         getSharedPreferences("push-registration", MODE_PRIVATE)
                 .registerOnSharedPreferenceChangeListener(pushStatusListener);
         requestNotificationPermissionIfNeeded();
