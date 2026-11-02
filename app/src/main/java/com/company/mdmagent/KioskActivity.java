@@ -42,6 +42,7 @@ public class KioskActivity extends Activity {
                 if(!KioskController.prefs(this).getStringSet("apps",Collections.emptySet()).contains(pkg))return;
                 Intent launch=getPackageManager().getLaunchIntentForPackage(pkg);
                 if(launch==null){Toast.makeText(this,"التطبيق غير متاح؛ راجع الإدارة",Toast.LENGTH_LONG).show();return;}
+                if (Build.VERSION.SDK_INT < 30) return;
                 try{ActivityOptions opts=ActivityOptions.makeBasic();opts.setLockTaskEnabled(true);startActivity(launch,opts.toBundle());}
                 catch(RuntimeException ex){Toast.makeText(this,"تعذر فتح التطبيق: "+ex.getMessage(),Toast.LENGTH_LONG).show();}
             });grid.addView(tile);

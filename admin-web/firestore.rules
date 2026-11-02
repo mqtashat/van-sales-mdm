@@ -49,45 +49,64 @@ service cloud.firestore {
     }
 
     function isValidPkg(pkg) {
-      return pkg is string
-        && pkg.size() >= 3
-        && pkg.size() <= 150
-        && pkg.matches('^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$')
-        && !(pkg in [
-          'com.company.mdmagent',
-          'com.android.settings',
-          'com.android.systemui',
-          'com.google.android.gms',
-          'com.google.android.gsf',
-          'com.android.vending'
-        ]);
+      return pkg is string && pkg.size() <= 150
+        && pkg.matches('^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$');
     }
-
-    function validPkgAt(apps, idx) {
-      return apps.size() <= idx || isValidPkg(apps[idx]);
-    }
-
-    function validAppsBatch(apps, offset) {
-      return validPkgAt(apps, offset + 0)
-        && validPkgAt(apps, offset + 1)
-        && validPkgAt(apps, offset + 2)
-        && validPkgAt(apps, offset + 3)
-        && validPkgAt(apps, offset + 4)
-        && validPkgAt(apps, offset + 5)
-        && validPkgAt(apps, offset + 6)
-        && validPkgAt(apps, offset + 7)
-        && validPkgAt(apps, offset + 8)
-        && validPkgAt(apps, offset + 9);
-    }
-
+    function validPkgAt(apps, idx) { return apps.size() <= idx || isValidPkg(apps[idx]); }
     function areAllBlockedAppsValid(apps) {
-      return apps is list
-        && apps.size() <= 50
-        && validAppsBatch(apps, 0)
-        && validAppsBatch(apps, 10)
-        && validAppsBatch(apps, 20)
-        && validAppsBatch(apps, 30)
-        && validAppsBatch(apps, 40);
+      return apps is list && apps.size() <= 50
+        && !apps.hasAny(['com.company.mdmagent','com.android.settings','com.android.systemui','com.google.android.gms','com.google.android.gsf','com.android.vending'])
+        && validPkgAt(apps, 0)
+        && validPkgAt(apps, 1)
+        && validPkgAt(apps, 2)
+        && validPkgAt(apps, 3)
+        && validPkgAt(apps, 4)
+        && validPkgAt(apps, 5)
+        && validPkgAt(apps, 6)
+        && validPkgAt(apps, 7)
+        && validPkgAt(apps, 8)
+        && validPkgAt(apps, 9)
+        && validPkgAt(apps, 10)
+        && validPkgAt(apps, 11)
+        && validPkgAt(apps, 12)
+        && validPkgAt(apps, 13)
+        && validPkgAt(apps, 14)
+        && validPkgAt(apps, 15)
+        && validPkgAt(apps, 16)
+        && validPkgAt(apps, 17)
+        && validPkgAt(apps, 18)
+        && validPkgAt(apps, 19)
+        && validPkgAt(apps, 20)
+        && validPkgAt(apps, 21)
+        && validPkgAt(apps, 22)
+        && validPkgAt(apps, 23)
+        && validPkgAt(apps, 24)
+        && validPkgAt(apps, 25)
+        && validPkgAt(apps, 26)
+        && validPkgAt(apps, 27)
+        && validPkgAt(apps, 28)
+        && validPkgAt(apps, 29)
+        && validPkgAt(apps, 30)
+        && validPkgAt(apps, 31)
+        && validPkgAt(apps, 32)
+        && validPkgAt(apps, 33)
+        && validPkgAt(apps, 34)
+        && validPkgAt(apps, 35)
+        && validPkgAt(apps, 36)
+        && validPkgAt(apps, 37)
+        && validPkgAt(apps, 38)
+        && validPkgAt(apps, 39)
+        && validPkgAt(apps, 40)
+        && validPkgAt(apps, 41)
+        && validPkgAt(apps, 42)
+        && validPkgAt(apps, 43)
+        && validPkgAt(apps, 44)
+        && validPkgAt(apps, 45)
+        && validPkgAt(apps, 46)
+        && validPkgAt(apps, 47)
+        && validPkgAt(apps, 48)
+        && validPkgAt(apps, 49)
+        ;
     }
 
     function isValidPolicy(data) {
