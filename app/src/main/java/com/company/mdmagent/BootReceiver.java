@@ -23,6 +23,11 @@ public class BootReceiver extends BroadcastReceiver {
         String trigger = Intent.ACTION_BOOT_COMPLETED.equals(action) ? "boot_completed" : "package_replaced";
         Log.i(TAG, "boot_receiver: action=" + trigger + " (" + PolicySyncService.describeEligibility(context) + ")");
 
+        if (KioskController.enabled(context)) {
+            try { KioskController.open(context); }
+            catch (RuntimeException ex) { Log.w(TAG, "kiosk_boot_launch_deferred", ex); }
+        }
+
         // Ensure periodic backup worker and a one-time connected backup worker are scheduled
         AgentApp.schedulePeriodicSync(context);
         AgentApp.enqueueOneTimeBackupSync(context, trigger);
@@ -33,3 +38,4 @@ public class BootReceiver extends BroadcastReceiver {
         }
     }
 }
+

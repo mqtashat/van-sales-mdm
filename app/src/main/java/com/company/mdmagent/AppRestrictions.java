@@ -103,7 +103,7 @@ final class AppRestrictions {
                 packages -> prefs.edit().putStringSet("hidden_by_agent", new HashSet<>(packages)).commit());
     }
 
-    private static Set<String> protectedPackages(Context context, DevicePolicyManager dpm) {
+    static Set<String> protectedPackages(Context context, DevicePolicyManager dpm) {
         Set<String> out = new HashSet<>(Arrays.asList(context.getPackageName(), "android",
                 "com.android.settings", "com.android.systemui", "com.android.phone", "com.android.server.telecom",
                 "com.google.android.gms", "com.google.android.gsf", "com.android.vending",

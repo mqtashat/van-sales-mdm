@@ -50,6 +50,9 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - name: Print lint diagnostics on failure
+        if: failure()
+        run: cat app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt || true
       - name: Verify APK signature matches the approved new key
         shell: bash
         run: |
@@ -115,3 +118,40 @@ jobs:
             PUSH-SETUP.md
           if-no-files-found: error
           retention-days: 14
+
+  admin-web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm install --ignore-scripts --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run test:contract
+      - run: npm run build
+      - run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-mdm "node --test tests/rules.test.mjs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: injaz-admin-kiosk
+          path: |
+            admin-web/dist/
+            admin-web/src/
+            admin-web/tests/
+            admin-web/package*.json
+            admin-web/*.rules
+            admin-web/firebase.json
+            admin-web/index.html
+            admin-web/tsconfig.json
+            admin-web/vite.config.ts
+            KIOSK-PILOT.md
+          if-no-files-found: error
+

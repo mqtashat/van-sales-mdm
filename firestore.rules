@@ -32,6 +32,31 @@ service cloud.firestore {
         && request.resource.data.agent_version is string && request.resource.data.agent_version.size() <= 40;
       allow list, delete: if false;
     }
+    match /kioskPolicies/{uid} {
+      allow get: if approved(uid);
+      allow list, write: if false;
+    }
+    match /deviceAppInventory/{uid} {
+      allow get: if approved(uid);
+      allow create, update: if approved(uid) && request.resource.data.schema_version == 1
+        && request.resource.data.reported_at == request.time && request.resource.data.apps is list
+        && request.resource.data.apps.size() <= 1000;
+      allow list, delete: if false;
+    }
+    function validKioskStatus(d) {
+      return d.keys().hasAll(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
+        && d.keys().hasOnly(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
+        && d.configured_revision is int && d.configured_revision >= 0
+        && d.active is bool && d.install_blocked is bool && d.maintenance is bool
+        && d.error is string && d.error.size() <= 1000 && d.reported_at == request.time;
+    }
+    match /kioskStatus/{uid} {
+      allow get: if approved(uid);
+      allow list: if false;
+      allow create, update: if approved(uid) && validKioskStatus(request.resource.data);
+      allow delete: if false;
+    }
     match /{document=**} { allow read, write: if false; }
   }
 }
+

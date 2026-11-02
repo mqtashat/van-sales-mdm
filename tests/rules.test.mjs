@@ -51,3 +51,4 @@ test('revoking approval removes server access', async () => {
   await assertFails(getDoc(doc(db, 'policies/a')));
   await assertFails(setDoc(doc(db, 'deviceStatus/a'), status()));
 });
+

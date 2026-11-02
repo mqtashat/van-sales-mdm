@@ -78,3 +78,4 @@ public class PolicyMessagingService extends FirebaseMessagingService {
         WorkManager.getInstance(this).enqueueUniqueWork("policy-push-sync", ExistingWorkPolicy.KEEP, backup.build());
     }
 }
+

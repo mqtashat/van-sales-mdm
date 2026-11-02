@@ -626,7 +626,15 @@ public class PolicySyncService extends Service {
                             Log.i(TAG, "fgs_policy_snapshot_server: triggering SyncEngine verification");
                             SyncEngine.requestSync(getApplicationContext(), "fgs_policy_snapshot");
                         });
-                return reg::remove;
+                final ListenerRegistration kiosk = db.collection("kioskPolicies").document(targetUid)
+                        .addSnapshotListener((snapshot, error) -> {
+                            if (error != null || snapshot == null || snapshot.getMetadata().isFromCache()
+                                    || !SESSION.hasActiveListenersFor(targetUid)) return;
+                            Long revision = snapshot.get("revision") instanceof Long ? snapshot.getLong("revision") : null;
+                            if (revision != null && revision > KioskController.prefs(PolicySyncService.this).getLong("accepted_revision", 0))
+                                SyncEngine.requestSync(getApplicationContext(), "kiosk_policy_changed");
+                        });
+                return () -> { reg.remove(); kiosk.remove(); };
             }
         };
         boolean attachedNew = SESSION.attachListenersIfNeeded(uid, factory);
@@ -732,4 +740,5 @@ public class PolicySyncService extends Service {
         return null;
     }
 }
+
 

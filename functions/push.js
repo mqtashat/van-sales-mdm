@@ -58,3 +58,4 @@ async function dispatch(uid, deps) {
   }
 }
 module.exports = {registerEndpoint, validateRegistration, endpointChanged, makeMessage, dispatch};
+
