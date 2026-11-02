@@ -21,10 +21,13 @@ public class KioskResumeTest {
         c=RuntimeEnvironment.getApplication();d=KioskController.dpm(c);admin=KioskController.admin(c);
         Shadows.shadowOf(d).setDeviceOwner(admin);
         SyncEngine.recordApprovalState(c.getSharedPreferences(SyncEngine.PREFS_NAME,0),"uid1",true);
-        ApplicationInfo ai=new ApplicationInfo();ai.packageName=pkg;ai.enabled=true;
+        ApplicationInfo ai=new ApplicationInfo();ai.packageName=pkg;ai.enabled=true;ai.flags=ApplicationInfo.FLAG_INSTALLED;
         ActivityInfo activity=new ActivityInfo();activity.packageName=pkg;activity.name=pkg+".Main";activity.applicationInfo=ai;activity.enabled=true;
+        PackageInfo installed=new PackageInfo();installed.packageName=pkg;installed.applicationInfo=ai;installed.activities=new ActivityInfo[]{activity};
+        Shadows.shadowOf(c.getPackageManager()).installPackage(installed);
         ResolveInfo resolve=new ResolveInfo();resolve.activityInfo=activity;
         Shadows.shadowOf(c.getPackageManager()).addResolveInfoForIntent(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(pkg),resolve);
+        assertNotNull("Fixture must register an installed launcher app",c.getPackageManager().getLaunchIntentForPackage(pkg));
     }
     @After public void cleanup(){KioskController.clearHookForTest=null;}
     KioskPolicy policy(long rev,boolean enabled){return new KioskPolicy(rev,enabled,Set.of(pkg),"a".repeat(32),"b".repeat(64));}
@@ -60,7 +63,8 @@ public class KioskResumeTest {
     }
     @Test public void failedResumeRetainsMaintenanceAndCredential()throws Exception{
         legacyMaintenance();KioskController.apply(c,policy(7,true));
-        d.clearDeviceOwnerApp(c.getPackageName());
+        Shadows.shadowOf(d).setDeviceOwner(null);
+        assertFalse(d.isDeviceOwnerApp(c.getPackageName()));
         assertThrows(IllegalStateException.class,()->KioskController.resumeMaintenance(c,"uid1"));
         assertTrue(KioskController.inMaintenance(c));assertEquals("b".repeat(64),KioskController.prefs(c).getString("exit_hash",""));
         assertFalse(KioskController.prefs(c).getString("last_error","").isEmpty());
