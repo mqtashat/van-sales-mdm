@@ -83,7 +83,7 @@ export function classifyAdminDocServerResult(input: {
         hasAdminDocRecord: false,
         status: 'permission_denied',
         detail:
-          'رفض الخادم قراءة admins/{uid} (permission-denied). هذا يعني عادةً أن قواعد firestore.rules المحلية لم تُنشر بعد في مشروع vansales-mdm.',
+          'رفض الخادم قراءة admins/{uid} (permission-denied). تحقق من صلاحية الحساب وتوثيق البريد وإعدادات المشروع وقاعدة البيانات وقواعد الأمان المعتمدة.',
       };
     }
 
@@ -570,7 +570,7 @@ export async function saveDeviceMetadata(
         updated_at: serverTimestamp(),
         updated_by_uid: actor.uid,
         updated_by_email: actor.email,
-      });
+      }, { merge: true });
 
       tx.set(auditRef, {
         actor_uid: actor.uid,
@@ -582,6 +582,80 @@ export async function saveDeviceMetadata(
         after: {
           device_name: cleanDeviceName,
           rep_name: cleanRepName,
+        },
+        created_at: serverTimestamp(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `deviceMetadata/${uid}`);
+  }
+}
+
+/**
+ * Sets the archived status of a device in deviceMetadata/{uid} and creates an auditLog entry atomically.
+ * Only authorized admins can archive or restore.
+ * Preserves enrollments, policies, status, and phone enforcement without deleting documents or Auth accounts.
+ */
+export async function setDeviceArchivedStatus(
+  db: Firestore,
+  rawUid: string,
+  archived: boolean,
+  actor: AdminIdentity
+): Promise<void> {
+  if (!actor.isAuthorizedAdmin) {
+    throw new Error('غير مصرح: يجب أن تكون مسؤولاً معتمداً لتنفيذ هذا الإجراء.');
+  }
+  const sanitized = sanitizeManualUid(rawUid);
+  if (!sanitized.valid) {
+    throw new Error(sanitized.error);
+  }
+  const uid = sanitized.uid;
+
+  const metaRef = doc(db, 'deviceMetadata', uid);
+  const auditRef = doc(db, 'auditLogs', createAuditId());
+
+  try {
+    await runTransaction(db, async (tx) => {
+      const currentSnap = await tx.get(metaRef);
+      const data = currentSnap.exists() ? currentSnap.data() : {};
+      const currentDeviceName = typeof data.device_name === 'string' ? data.device_name : '';
+      const currentRepName = typeof data.rep_name === 'string' ? data.rep_name : '';
+      const wasArchived = data.archived === true;
+
+      const displayName = currentDeviceName || currentRepName || uid;
+
+      tx.set(metaRef, {
+        device_name: currentDeviceName,
+        rep_name: currentRepName,
+        updated_at: serverTimestamp(),
+        updated_by_uid: actor.uid,
+        updated_by_email: actor.email,
+        archived,
+        archived_at: archived ? serverTimestamp() : null,
+        archived_by_uid: archived ? actor.uid : null,
+        archived_by_email: archived ? actor.email : null,
+      });
+
+      const action: AuditActionType = archived ? 'archive_device' : 'restore_device';
+      const summary = archived
+        ? `إزالة الجهاز من القائمة الرئيسية وأرشفته (${uid}): "${displayName}"`
+        : `استعادة الجهاز المؤرشف إلى القائمة الرئيسية (${uid}): "${displayName}"`;
+
+      tx.set(auditRef, {
+        actor_uid: actor.uid,
+        actor_email: actor.email,
+        target_uid: uid,
+        action,
+        summary,
+        before: {
+          archived: wasArchived,
+          device_name: currentDeviceName,
+          rep_name: currentRepName,
+        },
+        after: {
+          archived,
+          device_name: currentDeviceName,
+          rep_name: currentRepName,
         },
         created_at: serverTimestamp(),
       });

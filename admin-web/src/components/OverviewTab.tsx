@@ -1,254 +1,209 @@
 import React from 'react';
-import {
-  CheckCircle2,
-  Clock,
-  ShieldCheck,
-  AlertTriangle,
-  RefreshCw,
-  ArrowLeft,
-  Info,
-  Smartphone,
-  ChevronLeft,
-} from 'lucide-react';
-import type { MergedDeviceRecord } from '../types/mdm';
-import { formatLastSeenAr } from '../utils/validation';
+import { MergedDeviceRecord } from '../types/mdm';
 import {
   ApprovalBadge,
   EnforcementBadge,
   StaleConnectionBadge,
 } from './StatusBadges';
+import { formatTimestampAr } from '../utils/validation';
+import {
+  getDeviceFriendlyName,
+  formatEnforcementSummaryAr,
+} from '../utils/presentation';
+import {
+  Smartphone,
+  Clock,
+  AlertTriangle,
+  RefreshCw,
+  ArrowLeft,
+  ChevronLeft,
+  Info,
+} from 'lucide-react';
 
 interface OverviewTabProps {
   devices: MergedDeviceRecord[];
-  loading: boolean;
-  onSelectDeviceForPolicy: (uid: string) => void;
-  onNavigateDevices: (filter?: string) => void;
-  onNavigateEnrollments: () => void;
+  onNavigateDevices: () => void;
+  onSelectDevice: (uid: string) => void;
 }
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({
   devices,
-  loading,
-  onSelectDeviceForPolicy,
   onNavigateDevices,
-  onNavigateEnrollments,
+  onSelectDevice,
 }) => {
-  // Compute real metrics strictly from actual Firestore data
-  const totalCount = devices.length;
-  const pendingApprovalCount = devices.filter((d) => d.approvalState !== 'approved').length;
-  const pendingSyncCount = devices.filter((d) => d.enforcementState === 'pending').length;
-  const policyErrorsCount = devices.filter((d) => d.enforcementState === 'error').length;
-  const attentionDevices = devices.filter(
+  const activeDevices = devices.filter((d) => !d.isArchived);
+  const totalDevices = activeDevices.length;
+  const pendingCount = activeDevices.filter((d) => d.enforcementState === 'pending').length;
+  const errorCount = activeDevices.filter((d) => d.enforcementState === 'error').length;
+
+  let latestSeenMillis: number | null = null;
+  for (const d of activeDevices) {
+    if (d.lastSeenMs && (latestSeenMillis === null || d.lastSeenMs > latestSeenMillis)) {
+      latestSeenMillis = d.lastSeenMs;
+    }
+  }
+
+  const latestSeenFormatted = formatTimestampAr(latestSeenMillis);
+
+  const attentionDevices = activeDevices.filter(
     (d) =>
-      d.enforcementState === 'error' ||
       d.approvalState !== 'approved' ||
+      d.enforcementState === 'error' ||
       d.enforcementState === 'pending'
   );
 
-  // Latest sync timestamp across all reporting devices
-  const latestSeenMs = devices.reduce<number | null>((acc, d) => {
-    if (!d.lastSeenMs) return acc;
-    if (acc === null || d.lastSeenMs > acc) return d.lastSeenMs;
-    return acc;
-  }, null);
-
-  const latestSyncDetails = formatLastSeenAr(latestSeenMs);
+  const cards = [
+    {
+      title: 'إجمالي الأجهزة',
+      value: totalDevices,
+      subtitle: 'جميع الأجهزة المسجلة',
+      icon: <Smartphone className="w-5 h-5 text-slate-700" />,
+      border: 'border-slate-200',
+    },
+    {
+      title: 'أجهزة تحتاج متابعة',
+      value: attentionDevices.length,
+      subtitle: 'اعتماد أو انتظار تأكيد أو خطأ',
+      icon: <Clock className="w-5 h-5 text-amber-600" />,
+      border: attentionDevices.length > 0 ? 'border-amber-300' : 'border-slate-200',
+    },
+    {
+      title: 'تغييرات بانتظار تأكيد الهاتف',
+      value: pendingCount,
+      subtitle: 'حُفظت بالخادم وبانتظار الهاتف',
+      icon: <RefreshCw className="w-5 h-5 text-blue-600" />,
+      border: pendingCount > 0 ? 'border-blue-200' : 'border-slate-200',
+    },
+    {
+      title: 'مشاكل تطبيق السياسة',
+      value: errorCount,
+      subtitle: 'أجهزة أبلغت عن تعذر التطبيق',
+      icon: <AlertTriangle className="w-5 h-5 text-red-600" />,
+      border: errorCount > 0 ? 'border-red-300' : 'border-slate-200',
+    },
+  ];
 
   return (
-    <div className="space-y-6 text-right">
-      {/* Honest Operational Notice Banner */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs">
-        <div className="flex items-start gap-3">
-          <div className="p-2 bg-blue-50 text-blue-800 rounded-xl shrink-0 mt-0.5">
+    <div className="space-y-6" dir="rtl">
+      {/* Concise Sync Explanation Banner */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-start gap-3.5">
+          <div className="p-2.5 rounded-xl bg-blue-50 text-blue-700 border border-blue-200 shrink-0 mt-0.5">
             <Info className="w-5 h-5" />
           </div>
-          <div className="text-xs text-slate-700 space-y-1 leading-relaxed">
-            <h3 className="font-bold text-slate-900 text-sm">
-              طبيعة متابعة أجهزة المندوبين وتنفيذ السياسات
+          <div>
+            <h3 className="text-sm font-bold text-slate-900">
+              آلية تطبيق السياسات على هواتف المندوبين
             </h3>
-            <p>
-              عند تعديل السياسة، <strong className="text-slate-900">يُحفظ التغيير بالخادم أولاً وبانتظار تأكيد الهاتف</strong>.{' '}
-              المزامنة في الخلفية دورية (أو فورية عبر FCM والخدمة الأمامية بالوكيل 0.3.1+ عند توفر الشبكة)، وتخضع لقيود نظام أندرويد لتوفير الطاقة.{' '}
-              لا يُعد قِدَم آخر تواصل دليلاً قاطعاً على انقطاع الهاتف، كما أن اعتماد الجهاز لا يثبت تطبيق السياسة حتى يرد تقرير هاتف يطابق الإصدار.
+            <p className="text-xs text-slate-600 mt-1 leading-relaxed max-w-3xl">
+              عند تعديل أي سياسة أو تطبيق، <strong className="text-slate-900">يُحفظ التغيير في الخادم أولاً</strong> ثم يطبقه الهاتف ويرسل تأكيد التنفيذ عند اتصاله بالشبكة.
             </p>
           </div>
         </div>
 
-        <div className="shrink-0 border-t md:border-t-0 md:border-r border-slate-200 pt-3 md:pt-0 md:pr-4">
-          <span className="block text-[11px] text-slate-500">آخر تواصل مسجل من أي هاتف</span>
-          <span className="block text-sm font-bold font-mono text-slate-900 mt-0.5">
-            {latestSyncDetails.relative}
-          </span>
-          <span className="block text-[11px] font-mono text-slate-400 mt-0.5">
-            {latestSyncDetails.formatted}
-          </span>
+        <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 shrink-0 md:text-left">
+          <div className="text-xs text-slate-500">آخر تواصل مسجل من أي هاتف</div>
+          <div className="text-sm font-bold text-slate-900 mt-0.5">
+            {latestSeenMillis ? latestSeenFormatted.relative : 'لا يوجد بعد'}
+          </div>
+          {latestSeenMillis && (
+            <div className="text-[11px] text-slate-500 mt-0.5">
+              {latestSeenFormatted.formatted}
+            </div>
+          )}
         </div>
       </div>
 
-      {/* 4 Primary Clear KPI Cards */}
+      {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* 1. Total Devices */}
-        <button
-          type="button"
-          onClick={() => onNavigateDevices('all')}
-          className="text-right bg-white border border-slate-200 hover:border-slate-300 rounded-xl p-5 transition-colors flex flex-col justify-between shadow-2xs group"
-        >
-          <div className="flex items-center justify-between w-full">
-            <span className="text-xs font-bold text-slate-600">إجمالي الأجهزة</span>
-            <Smartphone className="w-4 h-4 text-slate-500 group-hover:text-blue-700 transition-colors" />
+        {cards.map((c, idx) => (
+          <div
+            key={idx}
+            onClick={onNavigateDevices}
+            className={`p-5 rounded-xl border bg-white ${c.border} shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between`}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-bold text-slate-600">{c.title}</span>
+              {c.icon}
+            </div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-2xl font-bold text-slate-900">{c.value}</span>
+              <span className="text-xs text-slate-500">{c.subtitle}</span>
+            </div>
           </div>
-          <div className="mt-4 flex items-baseline justify-between">
-            <span className="text-3xl font-bold font-mono text-slate-900 tabular-nums">
-              {loading ? '...' : totalCount}
-            </span>
-            <span className="text-xs text-slate-500 font-medium">
-              جميع المسجلين
-            </span>
-          </div>
-        </button>
-
-        {/* 2. Attention Needed */}
-        <button
-          type="button"
-          onClick={() => onNavigateDevices('all')}
-          className="text-right bg-white border border-slate-200 hover:border-amber-300 rounded-xl p-5 transition-colors flex flex-col justify-between shadow-2xs group"
-        >
-          <div className="flex items-center justify-between w-full">
-            <span className="text-xs font-bold text-slate-600">أجهزة تحتاج متابعة</span>
-            <Clock className="w-4 h-4 text-amber-600" />
-          </div>
-          <div className="mt-4 flex items-baseline justify-between">
-            <span className="text-3xl font-bold font-mono text-amber-700 tabular-nums">
-              {loading ? '...' : attentionDevices.length}
-            </span>
-            <span className="text-xs text-amber-800 font-semibold">
-              اعتماد أو مزامنة أو خطأ
-            </span>
-          </div>
-        </button>
-
-        {/* 3. Pending Phone Confirmation */}
-        <button
-          type="button"
-          onClick={() => onNavigateDevices('pending')}
-          className="text-right bg-white border border-slate-200 hover:border-blue-300 rounded-xl p-5 transition-colors flex flex-col justify-between shadow-2xs group"
-        >
-          <div className="flex items-center justify-between w-full">
-            <span className="text-xs font-bold text-slate-600">تغييرات بانتظار التطبيق</span>
-            <RefreshCw className="w-4 h-4 text-blue-700" />
-          </div>
-          <div className="mt-4 flex items-baseline justify-between">
-            <span className="text-3xl font-bold font-mono text-blue-800 tabular-nums">
-              {loading ? '...' : pendingSyncCount}
-            </span>
-            <span className="text-xs text-blue-800 font-semibold">
-              حُفظت وبانتظار تأكيد الهاتف
-            </span>
-          </div>
-        </button>
-
-        {/* 4. Execution Errors */}
-        <button
-          type="button"
-          onClick={() => onNavigateDevices('error')}
-          className="text-right bg-white border border-slate-200 hover:border-red-300 rounded-xl p-5 transition-colors flex flex-col justify-between shadow-2xs group"
-        >
-          <div className="flex items-center justify-between w-full">
-            <span className="text-xs font-bold text-slate-600">أخطاء التنفيذ</span>
-            <AlertTriangle className="w-4 h-4 text-red-600" />
-          </div>
-          <div className="mt-4 flex items-baseline justify-between">
-            <span
-              className={`text-3xl font-bold font-mono tabular-nums ${
-                policyErrorsCount > 0 ? 'text-red-700' : 'text-slate-900'
-              }`}
-            >
-              {loading ? '...' : policyErrorsCount}
-            </span>
-            <span className="text-xs text-red-800 font-semibold">
-              أبلغ الهاتف عن فشل
-            </span>
-          </div>
-        </button>
+        ))}
       </div>
 
-      {/* Actionable List of Devices Needing Intervention */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+      {/* Attention Required List */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50/60">
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              قائمة مختصرة بالأجهزة المحتاجة لتدخل ({attentionDevices.length})
+              الأجهزة التي تحتاج إلى متابعة ({attentionDevices.length})
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              أجهزة تنتظر اعتماد المسؤول، أو لديها سياسة جديدة بانتظار المزامنة، أو أبلغت عن خطأ في فرض القيود.
+              أجهزة بانتظار اعتماد المدير، أو لديها تعديلات بانتظار تأكيد الهاتف، أو أبلغت عن مشكلة في تطبيق القيود.
             </p>
           </div>
           <button
             type="button"
-            onClick={() => onNavigateDevices('all')}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-700 hover:text-blue-900 whitespace-nowrap shrink-0"
+            onClick={onNavigateDevices}
+            className="text-xs font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
           >
             <span>عرض كافة الأجهزة</span>
             <ArrowLeft className="w-3.5 h-3.5" />
           </button>
         </div>
 
-        {loading ? (
-          <div className="p-8 text-center text-xs text-slate-500">
-            جارٍ تحميل البيانات من الخادم…
-          </div>
-        ) : attentionDevices.length === 0 ? (
-          <div className="p-8 text-center space-y-2">
-            <p className="text-sm font-bold text-slate-800">
-              {devices.length === 0
-                ? 'لا توجد أجهزة مسجلة في النظام حتى الآن.'
-                : 'جميع الأجهزة تعمل بصورة مستقرة ومطابقة للسياسات المطلوبة.'}
-            </p>
-            <p className="text-xs text-slate-500">
-              {devices.length === 0
-                ? 'يمكنك إضافة جهاز جديد من صفحة «الأجهزة» باستخدام معرّف UID المنسوخ من هاتف المندوب.'
-                : 'لا توجد أجهزة تتطلب تدخلاً عاجلاً حالياً.'}
-            </p>
+        {attentionDevices.length === 0 ? (
+          <div className="p-8 text-center text-sm text-slate-500">
+            جميع الأجهزة المعتمدة مطبقة لأحدث السياسات ولا توجد مشاكل معلقة حالياً.
           </div>
         ) : (
-          <div className="divide-y divide-slate-100">
-            {attentionDevices.slice(0, 8).map((item) => {
-              const lastSeen = formatLastSeenAr(item.lastSeenMs);
-              const deviceName = item.metadata?.device_name || 'جهاز بدون اسم إداري';
-              const repName = item.metadata?.rep_name || 'غير محدد';
-              const model = item.status?.model || 'طراز غير معروف';
-
+          <div className="divide-y divide-slate-200">
+            {attentionDevices.slice(0, 8).map((d) => {
+              const friendlyName = getDeviceFriendlyName(d);
+              const tsInfo = formatTimestampAr(d.lastSeenMs);
+              const enforcementInfo = formatEnforcementSummaryAr(d);
               return (
                 <div
-                  key={item.uid}
-                  className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/80 transition-colors text-xs"
+                  key={d.uid}
+                  onClick={() => onSelectDevice(d.uid)}
+                  className="px-5 py-4 hover:bg-slate-50 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer"
                 >
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-slate-900 text-sm">{deviceName}</span>
-                      <ApprovalBadge state={item.approvalState} />
-                      <EnforcementBadge state={item.enforcementState} />
-                      <StaleConnectionBadge isStale={item.isStaleConnection} />
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-slate-900">
+                        {friendlyName}
+                      </span>
+                      <ApprovalBadge state={d.approvalState} />
+                      <EnforcementBadge state={d.enforcementState} />
+                      <StaleConnectionBadge isStale={d.isStaleConnection} />
                     </div>
-
-                    <div className="flex flex-wrap items-center gap-2 text-slate-500 text-[11px]">
-                      <span>المندوب: {repName}</span>
-                      <span>·</span>
-                      <span>{model}</span>
-                      <span>·</span>
-                      <span>آخر تواصل: {lastSeen.relative}</span>
+                    <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span>المندوب: {d.metadata?.rep_name || 'غير محدد'}</span>
+                      {d.status?.model && (
+                        <>
+                          <span>•</span>
+                          <span dir="ltr">{d.status.model}</span>
+                        </>
+                      )}
+                      <span>•</span>
+                      <span>آخر تواصل: {tsInfo.relative}</span>
                     </div>
-
-                    <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">
-                      {item.enforcementDetail}
+                    <p className="text-xs text-slate-700">
+                      {enforcementInfo.summary}
                     </p>
                   </div>
 
-                  <div className="shrink-0 pt-2 sm:pt-0">
+                  <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
                     <button
                       type="button"
-                      onClick={() => onSelectDeviceForPolicy(item.uid)}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold rounded-xl text-xs transition-colors whitespace-nowrap"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectDevice(d.uid);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white border border-blue-200 transition-colors cursor-pointer"
                     >
                       <span>إدارة الجهاز</span>
                       <ChevronLeft className="w-3.5 h-3.5" />

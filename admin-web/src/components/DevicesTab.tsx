@@ -1,149 +1,158 @@
-import React, { useState, useMemo } from 'react';
-import {
-  Search,
-  Plus,
-  Sliders,
-  CheckCircle2,
-  Clock,
-  AlertTriangle,
-  Layers,
-  Wifi,
-  WifiOff,
-  Battery,
-  ChevronLeft,
-  X,
-  Smartphone,
-  Save,
-  Check,
-} from 'lucide-react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { Firestore } from 'firebase/firestore';
-import type {
-  AdminIdentity,
-  AuditLogDoc,
-  BulkActionType,
+import {
   MergedDeviceRecord,
+  AuditLogDoc,
+  AdminIdentity,
+  BulkActionType,
 } from '../types/mdm';
 import {
-  formatLastSeenAr,
-  sanitizeManualUid,
-} from '../utils/validation';
-import {
   ApprovalBadge,
-  DeviceOwnerBadge,
   EnforcementBadge,
-  StaleConnectionBadge,
 } from './StatusBadges';
 import { DeviceDetailDrawer } from './DeviceDetailDrawer';
 import { BulkActionModal } from './BulkActionModal';
+import {
+  sanitizeManualUid,
+  formatTimestampAr,
+  HARDCODED_PROTECTED_PACKAGES,
+  validatePackageName,
+} from '../utils/validation';
+import { CURATED_APP_CATALOG } from '../utils/appCatalog';
+import { saveDeviceMetadata } from '../services/mdmService';
+import { getDeviceFriendlyName } from '../utils/presentation';
+import {
+  Search,
+  Plus,
+  Smartphone,
+  Battery,
+  ChevronLeft,
+  AlertCircle,
+  CheckCircle2,
+  AppWindow,
+  WifiOff,
+  Wifi,
+  X,
+} from 'lucide-react';
 
-export type DeviceFilterKey =
+export type DeviceFilterCategory =
   | 'all'
   | 'approved'
-  | 'pending_approval'
+  | 'unapproved'
   | 'applied'
   | 'pending'
   | 'error'
-  | 'stale';
+  | 'stale'
+  | 'archived';
 
 interface DevicesTabProps {
   devices: MergedDeviceRecord[];
-  initialFilter?: DeviceFilterKey;
   auditLogs: AuditLogDoc[];
   db: Firestore;
   actor: AdminIdentity;
-  selectedDeviceUid?: string | null;
-  onSelectDeviceUid?: (uid: string | null) => void;
-  externalBulkAction?: {
-    type: BulkActionType;
-    params?: { packages?: string[]; allowTethering?: boolean };
-  } | null;
-  onClearExternalBulkAction?: () => void;
-  onSaveMetadata: (uid: string, deviceName: string, repName: string) => Promise<void>;
-  onToggleApproval: (uid: string, approved: boolean, optionalMeta?: { device_name: string; rep_name: string }) => Promise<void>;
-  onSavePolicy: (
-    uid: string,
-    payload: {
-      block_tethering: boolean;
-      blocked_apps: string[];
-      expectedCurrentRevision: number | null;
-      allowRepairCorrupted?: boolean;
-    }
-  ) => Promise<{ savedRevision: number }>;
+  selectedDeviceUid: string | null;
+  onSelectDeviceUid: (uid: string | null) => void;
+  deviceTab?: 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history';
+  onDeviceTabChange?: (tab: 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history') => void;
+  discardDraftSignal?: number;
+  searchQuery?: string;
+  onSearchQueryChange?: (q: string) => void;
+  activeFilter?: DeviceFilterCategory;
+  onActiveFilterChange?: (f: DeviceFilterCategory) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onNavigateAdvancedSettings?: () => void;
 }
 
 export const DevicesTab: React.FC<DevicesTabProps> = ({
   devices,
-  initialFilter = 'all',
   auditLogs,
   db,
   actor,
-  selectedDeviceUid: externalSelectedDeviceUid,
+  selectedDeviceUid,
   onSelectDeviceUid,
-  externalBulkAction,
-  onClearExternalBulkAction,
-  onSaveMetadata,
-  onToggleApproval,
-  onSavePolicy,
+  deviceTab,
+  onDeviceTabChange,
+  discardDraftSignal,
+  searchQuery: controlledSearchQuery,
+  onSearchQueryChange,
+  activeFilter: controlledActiveFilter,
+  onActiveFilterChange,
+  onDirtyChange,
+  onNavigateAdvancedSettings,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState<DeviceFilterKey>(initialFilter);
+  const [internalSearchQuery, setInternalSearchQuery] = useState('');
+  const [internalActiveFilter, setInternalActiveFilter] = useState<DeviceFilterCategory>('all');
+
+  const searchQuery =
+    controlledSearchQuery !== undefined ? controlledSearchQuery : internalSearchQuery;
+  const setSearchQuery = onSearchQueryChange || setInternalSearchQuery;
+
+  const activeFilter =
+    controlledActiveFilter !== undefined ? controlledActiveFilter : internalActiveFilter;
+  const setActiveFilter = onActiveFilterChange || setInternalActiveFilter;
+
+  // Multi-select state for bulk actions
   const [selectedUids, setSelectedUids] = useState<Set<string>>(new Set());
 
-  // Active Device for Detail Drawer (controlled or uncontrolled)
-  const [internalSelectedUid, setInternalSelectedUid] = useState<string | null>(null);
-  const selectedDeviceUid =
-    externalSelectedDeviceUid !== undefined ? externalSelectedDeviceUid : internalSelectedUid;
-  const setSelectedDeviceUid = (uid: string | null) => {
-    if (onSelectDeviceUid) {
-      onSelectDeviceUid(uid);
-    } else {
-      setInternalSelectedUid(uid);
-    }
-  };
+  // App picker step when user clicks bulk "حظر تطبيق..." or "السماح بتطبيق..."
+  const [appPickerMode, setAppPickerMode] = useState<'block_apps' | 'allow_apps' | null>(null);
+  const [pickedPackages, setPickedPackages] = useState<Set<string>>(new Set());
+  const [customBulkPkg, setCustomBulkPkg] = useState('');
+  const [customBulkError, setCustomBulkError] = useState<string | null>(null);
 
-  // Add / Enroll New Device Modal
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [manualUid, setManualUid] = useState('');
+  // Active BulkActionModal state
+  const [bulkModalConfig, setBulkModalConfig] = useState<{
+    actionType: BulkActionType;
+    actionParams: { packages?: string[]; allowTethering?: boolean };
+  } | null>(null);
+
+  // Pre-register new device metadata modal state
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [newUid, setNewUid] = useState('');
   const [newDeviceName, setNewDeviceName] = useState('');
   const [newRepName, setNewRepName] = useState('');
-  const [submittingAdd, setSubmittingAdd] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createSuccess, setCreateSuccess] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
-  // Bulk Action Modal State
-  const [bulkModalOpen, setBulkModalOpen] = useState(false);
-  const [bulkActionType, setBulkActionType] = useState<BulkActionType>('block_apps');
-  const [bulkActionParams, setBulkActionParams] = useState<{
-    packages?: string[];
-    allowTethering?: boolean;
-  }>({});
+  const activeDevices = useMemo(() => devices.filter((d) => !d.isArchived), [devices]);
+  const archivedDevices = useMemo(() => devices.filter((d) => d.isArchived), [devices]);
+  useEffect(() => {
+    const eligible = new Set(activeDevices.map(d => d.uid));
+    setSelectedUids(previous => {
+      const next = new Set([...previous].filter(uid => eligible.has(uid)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [activeDevices]);
 
-  // Trigger bulk action if external action is requested (e.g., from FleetAppsTab)
-  React.useEffect(() => {
-    if (externalBulkAction) {
-      setBulkActionType(externalBulkAction.type);
-      setBulkActionParams(externalBulkAction.params || {});
-      // If no devices were selected, select all devices by default
-      if (selectedUids.size === 0 && devices.length > 0) {
-        setSelectedUids(new Set(devices.map((d) => d.uid)));
-      }
-      setBulkModalOpen(true);
-      onClearExternalBulkAction?.();
-    }
-  }, [externalBulkAction, devices, onClearExternalBulkAction, selectedUids.size]);
+  const counts = useMemo(() => {
+    return {
+      all: activeDevices.length,
+      approved: activeDevices.filter((d) => d.approvalState === 'approved').length,
+      unapproved: activeDevices.filter((d) => d.approvalState !== 'approved').length,
+      applied: activeDevices.filter((d) => d.enforcementState === 'applied').length,
+      pending: activeDevices.filter((d) => d.enforcementState === 'pending').length,
+      error: activeDevices.filter((d) => d.enforcementState === 'error').length,
+      stale: activeDevices.filter((d) => d.isStaleConnection).length,
+      archived: archivedDevices.length,
+    };
+  }, [activeDevices, archivedDevices]);
 
-  // Filtered devices based on search and status chips
   const filteredDevices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
     return devices.filter((d) => {
-      // Filter key
-      if (activeFilter === 'approved' && d.approvalState !== 'approved') return false;
-      if (activeFilter === 'pending_approval' && d.approvalState === 'approved') return false;
-      if (activeFilter === 'applied' && d.enforcementState !== 'applied') return false;
-      if (activeFilter === 'pending' && d.enforcementState !== 'pending') return false;
-      if (activeFilter === 'error' && d.enforcementState !== 'error') return false;
-      if (activeFilter === 'stale' && !d.isStaleConnection) return false;
+      if (activeFilter === 'archived') {
+        if (!d.isArchived) return false;
+      } else {
+        if (d.isArchived) return false;
+        if (activeFilter === 'approved' && d.approvalState !== 'approved') return false;
+        if (activeFilter === 'unapproved' && d.approvalState === 'approved') return false;
+        if (activeFilter === 'applied' && d.enforcementState !== 'applied') return false;
+        if (activeFilter === 'pending' && d.enforcementState !== 'pending') return false;
+        if (activeFilter === 'error' && d.enforcementState !== 'error') return false;
+        if (activeFilter === 'stale' && !d.isStaleConnection) return false;
+      }
 
-      // Search query
-      const q = searchQuery.trim().toLowerCase();
       if (!q) return true;
       const uidMatch = d.uid.toLowerCase().includes(q);
       const nameMatch = (d.metadata?.device_name || '').toLowerCase().includes(q);
@@ -151,447 +160,592 @@ export const DevicesTab: React.FC<DevicesTabProps> = ({
       const modelMatch = (d.status?.model || '').toLowerCase().includes(q);
       return uidMatch || nameMatch || repMatch || modelMatch;
     });
-  }, [devices, activeFilter, searchQuery]);
+  }, [devices, searchQuery, activeFilter]);
 
-  // Handle Select All
-  const handleToggleSelectAll = () => {
-    if (selectedUids.size === filteredDevices.length && filteredDevices.length > 0) {
-      setSelectedUids(new Set());
-    } else {
-      setSelectedUids(new Set(filteredDevices.map((d) => d.uid)));
-    }
-  };
+  const selectedDevice = useMemo(
+    () => devices.find((d) => d.uid === selectedDeviceUid) || null,
+    [devices, selectedDeviceUid]
+  );
 
-  const handleToggleDevice = (uid: string) => {
+  const toggleSelectOne = (uid: string, e: React.MouseEvent) => {
+    e.stopPropagation();
     const next = new Set(selectedUids);
     if (next.has(uid)) next.delete(uid);
     else next.add(uid);
     setSelectedUids(next);
   };
 
-  // Trigger Bulk Action
-  const openBulkAction = (
-    type: BulkActionType,
-    params: { packages?: string[]; allowTethering?: boolean }
-  ) => {
-    setBulkActionType(type);
-    setBulkActionParams(params);
-    setBulkModalOpen(true);
+  const toggleSelectAllFiltered = () => {
+    const allFilteredSelected =
+      filteredDevices.length > 0 && filteredDevices.every((d) => selectedUids.has(d.uid));
+    const next = new Set(selectedUids);
+    if (allFilteredSelected) {
+      filteredDevices.forEach((d) => next.delete(d.uid));
+    } else {
+      filteredDevices.forEach((d) => next.add(d.uid));
+    }
+    setSelectedUids(next);
   };
 
-  // Submit Add Device form
-  const handleAddDeviceSubmit = async (e: React.FormEvent) => {
+  const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setAddError(null);
-    const sanitized = sanitizeManualUid(manualUid);
-    if (!sanitized.valid) {
-      setAddError(sanitized.error || 'معرّف UID غير صالح.');
+    setCreateError(null);
+    setCreateSuccess(null);
+
+    const uidCheck = sanitizeManualUid(newUid);
+    if (!uidCheck.valid) {
+      setCreateError(uidCheck.error || 'معرف الجهاز غير صالح');
       return;
     }
 
-    setSubmittingAdd(true);
+    if (!newDeviceName.trim()) {
+      setCreateError('يرجى إدخال اسم الجهاز الإداري.');
+      return;
+    }
+
+    setCreating(true);
     try {
-      await onToggleApproval(sanitized.uid, true, {
-        device_name: newDeviceName.trim(),
-        rep_name: newRepName.trim(),
-      });
-      setShowAddModal(false);
-      setManualUid('');
+      await saveDeviceMetadata(db, uidCheck.uid, newDeviceName, newRepName, actor);
+      setCreateSuccess('تم حفظ تعريف الجهاز بنجاح.');
+      setNewUid('');
       setNewDeviceName('');
       setNewRepName('');
-      // Open the newly added device in the drawer directly
-      setSelectedDeviceUid(sanitized.uid);
-    } catch (err) {
-      setAddError(err instanceof Error ? err.message : String(err));
+      setShowCreateModal(false);
+      onSelectDeviceUid(uidCheck.uid);
+    } catch (err: any) {
+      setCreateError(err?.message || 'فشل إنشاء تعريف الجهاز');
     } finally {
-      setSubmittingAdd(false);
+      setCreating(false);
     }
   };
 
-  const activeDrawerDevice = devices.find((d) => d.uid === selectedDeviceUid) || null;
+  const handleAddCustomBulkPkg = () => {
+    setCustomBulkError(null);
+    const trimmed = customBulkPkg.trim();
+    if (!trimmed) return;
+    const check = validatePackageName(trimmed, Array.from(pickedPackages));
+    if (!check.valid) {
+      setCustomBulkError(check.error || 'اسم الحزمة غير صالح');
+      return;
+    }
+    const next = new Set(pickedPackages);
+    next.add(trimmed);
+    setPickedPackages(next);
+    setCustomBulkPkg('');
+  };
+
+  const filterButtons: { id: DeviceFilterCategory; label: string; count: number }[] = [
+    { id: 'all', label: 'جميع الأجهزة', count: counts.all },
+    { id: 'approved', label: 'معتمد', count: counts.approved },
+    { id: 'unapproved', label: 'ينتظر الاعتماد', count: counts.unapproved },
+    { id: 'applied', label: 'مطبق بالهاتف', count: counts.applied },
+    { id: 'pending', label: 'بانتظار التأكيد', count: counts.pending },
+    { id: 'error', label: 'أخطاء', count: counts.error },
+    { id: 'stale', label: 'اتصال قديم', count: counts.stale },
+    { id: 'archived', label: 'الأجهزة المؤرشفة', count: counts.archived },
+  ];
+
+  // Full-Page Device Management Mode when a device is selected
+  if (selectedDeviceUid && selectedDevice) {
+    return (
+      <DeviceDetailDrawer
+        device={selectedDevice}
+        allDevices={devices}
+        auditLogs={auditLogs}
+        db={db}
+        actor={actor}
+        activeTab={deviceTab}
+        onTabChange={onDeviceTabChange}
+        discardDraftSignal={discardDraftSignal}
+        onClose={() => onSelectDeviceUid(null)}
+        onDirtyChange={onDirtyChange}
+        onNavigateAdvancedSettings={onNavigateAdvancedSettings}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-6 text-right">
-      {/* Top Action Bar */}
-      <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-5" dir="rtl">
+      {/* Header Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-5 rounded-xl border border-slate-200 shadow-xs">
         <div>
           <h2 className="text-lg font-bold text-slate-900">أجهزة المندوبين</h2>
-          <p className="text-xs text-slate-500 mt-1">
-            اختر جهازًا لإدارته، أو حدد عدة أجهزة لتطبيق قيود التطبيقات ومشاركة الإنترنت دفعة واحدة.
+          <p className="text-xs text-slate-600 mt-0.5">
+            اختر أي جهاز لفتح صفحة إدارته الكاملة، أو حدد عدة أجهزة لتطبيق إجراءات جماعية على التطبيقات ومشاركة الإنترنت.
           </p>
         </div>
-
-        <div className="flex items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => setShowAddModal(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold transition-colors shadow-xs"
-          >
-            <Plus className="w-4 h-4" />
-            <span>إضافة جهاز جديد</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setShowCreateModal(!showCreateModal);
+            setCreateError(null);
+            setCreateSuccess(null);
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 transition-colors shadow-xs self-start sm:self-auto cursor-pointer"
+        >
+          <Plus className="w-4 h-4" />
+          <span>إضافة جهاز جديد</span>
+        </button>
       </div>
 
-      {/* Search and Filters */}
-      <div className="space-y-3">
+      {/* Create Metadata Form Panel */}
+      {showCreateModal && (
+        <form
+          onSubmit={handleCreateSubmit}
+          className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm space-y-4"
+        >
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">تسجيل تعريف مسبق لجهاز مندوب</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                أدخل معرف الجهاز الظاهر في شاشة تطبيق الحماية على الهاتف لتعيين اسمه والمندوب المسؤول عنه.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(false)}
+              className="text-xs text-slate-500 hover:text-slate-700 font-semibold cursor-pointer"
+            >
+              إلغاء
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                معرف الجهاز (UID) <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                dir="ltr"
+                required
+                value={newUid}
+                onChange={(e) => setNewUid(e.target.value)}
+                placeholder="أدخل المعرف من الهاتف"
+                className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                اسم الجهاز الإداري <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                required
+                value={newDeviceName}
+                onChange={(e) => setNewDeviceName(e.target.value)}
+                placeholder="مثال: هاتف مندوب جدة 2"
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                اسم المندوب
+              </label>
+              <input
+                type="text"
+                value={newRepName}
+                onChange={(e) => setNewRepName(e.target.value)}
+                placeholder="مثال: خالد القحطاني"
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+              />
+            </div>
+          </div>
+
+          {createError && (
+            <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{createError}</span>
+            </div>
+          )}
+
+          {createSuccess && (
+            <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{createSuccess}</span>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <button
+              type="submit"
+              disabled={creating}
+              className="px-4 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+            >
+              {creating ? 'جارٍ الحفظ...' : 'حفظ وفتح صفحة الجهاز'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Search & Filter Bar */}
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
         <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-3" />
+          <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="ابحث بالاسم الإداري، اسم المندوب، طراز الجهاز، أو معرّف UID…"
-            className="w-full pr-10 pl-4 py-2.5 bg-white border border-slate-300 rounded-xl text-xs focus:outline-hidden focus:ring-1 focus:ring-blue-600 shadow-2xs"
+            placeholder="ابحث باسم الجهاز، اسم المندوب، أو طراز الهاتف..."
+            className="w-full pr-10 pl-4 py-2.5 text-sm rounded-xl border border-slate-200 bg-slate-50/50 focus:bg-white focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
           />
         </div>
 
-        {/* Filter Chips */}
-        <div className="flex items-center gap-1.5 overflow-x-auto text-xs font-semibold pb-1">
-          <button
-            type="button"
-            onClick={() => setActiveFilter('all')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'all'
-                ? 'bg-slate-900 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            جميع الأجهزة ({devices.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveFilter('approved')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'approved'
-                ? 'bg-emerald-700 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            معتمد ({devices.filter((d) => d.approvalState === 'approved').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveFilter('pending_approval')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'pending_approval'
-                ? 'bg-amber-700 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            ينتظر الاعتماد ({devices.filter((d) => d.approvalState !== 'approved').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveFilter('applied')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'applied'
-                ? 'bg-blue-700 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            مطبق بالهاتف ({devices.filter((d) => d.enforcementState === 'applied').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveFilter('pending')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'pending'
-                ? 'bg-indigo-700 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            بانتظار المزامنة ({devices.filter((d) => d.enforcementState === 'pending').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveFilter('error')}
-            className={`px-3 py-1.5 rounded-lg whitespace-nowrap transition-colors ${
-              activeFilter === 'error'
-                ? 'bg-red-700 text-white'
-                : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            أخطاء ({devices.filter((d) => d.enforcementState === 'error').length})
-          </button>
+        <div className="flex flex-wrap gap-1.5">
+          {filterButtons.map((btn) => (
+            <button
+              key={btn.id}
+              type="button"
+              onClick={() => setActiveFilter(btn.id)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                activeFilter === btn.id
+                  ? 'bg-slate-900 text-white shadow-2xs'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+            >
+              {btn.label} ({btn.count})
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Main Concise Devices Table */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
-        <div className="overflow-x-auto">
-          <table className="w-full text-right text-xs">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
-              <tr>
-                <th className="py-3.5 px-4 w-12 text-center">
-                  <input
-                    type="checkbox"
-                    checked={
-                      selectedUids.size > 0 &&
-                      selectedUids.size === filteredDevices.length &&
-                      filteredDevices.length > 0
-                    }
-                    onChange={handleToggleSelectAll}
-                    className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                    title="تحديد الكل"
-                  />
-                </th>
-                <th className="py-3.5 px-4 min-w-[220px]">الجهاز والمندوب</th>
-                <th className="py-3.5 px-4 min-w-[140px]">آخر تواصل</th>
-                <th className="py-3.5 px-4 min-w-[90px]">البطارية</th>
-                <th className="py-3.5 px-4 min-w-[150px]">حالة التغييرات</th>
-                <th className="py-3.5 px-4 w-28 text-center">إدارة الجهاز</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredDevices.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-500">
-                    لا توجد أجهزة مطابقة لمعايير البحث أو الفلترة.
-                  </td>
+      {/* Bulk Action Bar (Shown when devices are checked) */}
+      {selectedUids.size > 0 && (
+        <div className="bg-slate-900 text-white px-5 py-3.5 rounded-xl shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="px-2.5 py-1 rounded-lg bg-blue-600 text-xs font-bold">
+              {selectedUids.size} جهاز محدد
+            </span>
+            <span className="text-xs text-slate-300">
+              اختر الإجراء الجماعي لتطبيقه على الأجهزة المحددة:
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setPickedPackages(new Set());
+                setCustomBulkPkg('');
+                setCustomBulkError(null);
+                setAppPickerMode('block_apps');
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-red-600 hover:bg-red-500 text-white transition-colors cursor-pointer"
+            >
+              <AppWindow className="w-3.5 h-3.5" />
+              <span>حظر تطبيق...</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPickedPackages(new Set());
+                setCustomBulkPkg('');
+                setCustomBulkError(null);
+                setAppPickerMode('allow_apps');
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer"
+            >
+              <AppWindow className="w-3.5 h-3.5" />
+              <span>السماح بتطبيق...</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setBulkModalConfig({
+                  actionType: 'set_tethering',
+                  actionParams: { allowTethering: false },
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-colors cursor-pointer"
+            >
+              <WifiOff className="w-3.5 h-3.5" />
+              <span>منع مشاركة الإنترنت</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setBulkModalConfig({
+                  actionType: 'set_tethering',
+                  actionParams: { allowTethering: true },
+                })
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-colors cursor-pointer"
+            >
+              <Wifi className="w-3.5 h-3.5" />
+              <span>السماح بمشاركة الإنترنت</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedUids(new Set())}
+              className="px-2.5 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white cursor-pointer"
+            >
+              إلغاء التحديد
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Devices Table */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+        {filteredDevices.length === 0 ? (
+          <div className="p-12 text-center">
+            <Smartphone className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+            <h3 className="text-sm font-bold text-slate-800">لا توجد أجهزة مطابقة</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              جرب تغيير كلمات البحث أو اختيار تصنيف آخر.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-right border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50/90 text-xs font-bold text-slate-600">
+                  <th className="py-3.5 px-4 w-10">
+                    <input
+                      type="checkbox"
+                      checked={
+                        filteredDevices.length > 0 &&
+                        filteredDevices.every((d) => selectedUids.has(d.uid))
+                      }
+                      onChange={toggleSelectAllFiltered}
+                      aria-label="تحديد جميع الأجهزة المعروضة"
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                    />
+                  </th>
+                  <th className="py-3.5 px-4">الجهاز والمندوب</th>
+                  <th className="py-3.5 px-4">الاعتماد</th>
+                  <th className="py-3.5 px-4">آخر تواصل</th>
+                  <th className="py-3.5 px-4">البطارية</th>
+                  <th className="py-3.5 px-4">حالة السياسة</th>
+                  <th className="py-3.5 px-4 text-left">إدارة الجهاز</th>
                 </tr>
-              ) : (
-                filteredDevices.map((device) => {
-                  const isSelected = selectedUids.has(device.uid);
-                  const lastSeen = formatLastSeenAr(device.lastSeenMs);
-                  const deviceName = device.metadata?.device_name || 'جهاز بدون اسم';
-                  const repName = device.metadata?.rep_name || 'غير محدد';
-                  const model = device.status?.model || 'طراز غير معروف';
+              </thead>
+              <tbody className="divide-y divide-slate-200 text-xs">
+                {filteredDevices.map((d) => {
+                  const isChecked = selectedUids.has(d.uid);
+                  const friendlyName = getDeviceFriendlyName(d);
+                  const tsInfo = formatTimestampAr(d.lastSeenMs);
 
                   return (
                     <tr
-                      key={device.uid}
-                      className={`transition-colors ${
-                        isSelected ? 'bg-blue-50/40' : 'hover:bg-slate-50/80'
+                      key={d.uid}
+                      onClick={() => onSelectDeviceUid(d.uid)}
+                      className={`hover:bg-blue-50/40 transition-colors cursor-pointer ${
+                        isChecked ? 'bg-blue-50/60' : ''
                       }`}
                     >
-                      <td className="py-3 px-4 text-center">
+                      <td
+                        className="py-4 px-4"
+                        onClick={(e) => toggleSelectOne(d.uid, e)}
+                      >
                         <input
                           type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleToggleDevice(device.uid)}
-                          className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
+                          checked={isChecked}
+                          onChange={() => {}}
+                          aria-label={`تحديد ${friendlyName}`}
+                          className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                         />
                       </td>
 
-                      <td className="py-3 px-4">
-                        <div
-                          className="cursor-pointer"
-                          onClick={() => setSelectedDeviceUid(device.uid)}
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-slate-900 text-xs hover:text-blue-700 transition-colors">
-                              {deviceName}
+                      {/* Device Name & Sales Rep */}
+                      <td className="py-4 px-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-slate-900 text-sm">
+                            {friendlyName}
+                          </span>
+                          {d.isArchived && (
+                            <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                              مؤرشف
                             </span>
-                            {device.approvalState !== 'approved' && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-100 text-amber-900 font-semibold">
-                                غير معتمد
+                          )}
+                        </div>
+                        <div className="text-slate-600 mt-1 flex flex-wrap items-center gap-2">
+                          <span>المندوب: {d.metadata?.rep_name || 'غير محدد'}</span>
+                          {d.status?.model && (
+                            <>
+                              <span className="text-slate-300">•</span>
+                              <span className="text-slate-500" dir="ltr">
+                                {d.status.model}
                               </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5">
-                            <span>المندوب: {repName}</span>
-                            <span>·</span>
-                            <span>{model}</span>
-                          </div>
+                            </>
+                          )}
                         </div>
                       </td>
 
-                      <td className="py-3 px-4">
-                        <div title={lastSeen.explanation}>
-                          <span className="font-semibold text-slate-800 block">
-                            {lastSeen.relative}
+                      {/* Approval Status */}
+                      <td className="py-4 px-4 whitespace-nowrap">
+                        <ApprovalBadge state={d.approvalState} />
+                      </td>
+
+                      {/* Last Seen */}
+                      <td className="py-4 px-4 whitespace-nowrap">
+                        <div className="font-bold text-slate-800">{tsInfo.relative}</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">{tsInfo.formatted}</div>
+                      </td>
+
+                      {/* Battery */}
+                      <td className="py-4 px-4 whitespace-nowrap">
+                        {d.status?.battery_percent !== undefined && d.status?.battery_percent >= 0 ? (
+                          <span className="inline-flex items-center gap-1.5 font-bold text-slate-800">
+                            <Battery className="w-4 h-4 text-slate-400" />
+                            {d.status.battery_percent}%
                           </span>
-                          <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
-                            {lastSeen.formatted}
-                          </span>
-                        </div>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </td>
 
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5 font-mono text-slate-800 font-bold">
-                          <Battery className="w-4 h-4 text-slate-400" />
-                          <span>{device.status ? `${device.status.battery_percent}%` : '—'}</span>
-                        </div>
+                      {/* Enforcement Status */}
+                      <td className="py-4 px-4 whitespace-nowrap">
+                        <EnforcementBadge state={d.enforcementState} />
                       </td>
 
-                      <td className="py-3 px-4">
-                        <EnforcementBadge state={device.enforcementState} />
-                      </td>
-
-                      <td className="py-3 px-4 text-center">
+                      {/* Action */}
+                      <td className="py-4 px-4 text-left whitespace-nowrap">
                         <button
                           type="button"
-                          onClick={() => setSelectedDeviceUid(device.uid)}
-                          className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold rounded-lg text-xs transition-colors"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectDeviceUid(d.uid);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white border border-blue-200 transition-colors cursor-pointer"
                         >
-                          <span>إدارة</span>
+                          <span>إدارة الجهاز</span>
                           <ChevronLeft className="w-3.5 h-3.5" />
                         </button>
                       </td>
                     </tr>
                   );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* Sticky Bulk Actions Toolbar appearing when devices are selected */}
-      {selectedUids.size > 0 && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 max-w-xl w-full px-4">
-          <div className="bg-slate-900 text-white rounded-2xl p-3.5 shadow-2xl flex flex-wrap items-center justify-between gap-3 text-xs border border-slate-700">
-            <div className="flex items-center gap-2 pr-2">
-              <span className="font-bold">محدد: {selectedUids.size} جهاز</span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => openBulkAction('block_apps', { packages: [] })}
-                className="inline-flex items-center gap-1 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold transition-colors"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>منع تطبيقات…</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => openBulkAction('set_tethering', { allowTethering: false })}
-                className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 rounded-xl font-bold transition-colors"
-              >
-                <WifiOff className="w-3.5 h-3.5" />
-                <span>حظر الهوتسبوت</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => openBulkAction('set_tethering', { allowTethering: true })}
-                className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 rounded-xl font-bold transition-colors"
-              >
-                <Wifi className="w-3.5 h-3.5" />
-                <span>السماح بالهوتسبوت</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSelectedUids(new Set())}
-                className="p-1.5 text-slate-400 hover:text-white rounded-lg transition-colors"
-                title="إلغاء التحديد"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add / Enroll Device Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-right">
+      {/* App Picker Modal before Bulk App Action */}
+      {appPickerMode && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs"
+          dir="rtl"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <h3 className="font-bold text-slate-900 text-sm">إضافة واعتماد جهاز جديد</h3>
+              <h3 className="text-base font-bold text-slate-900">
+                {appPickerMode === 'block_apps'
+                  ? 'اختر التطبيقات المراد حظرها على الأجهزة المحددة'
+                  : 'اختر التطبيقات المراد رفع الحظر عنها'}
+              </h3>
               <button
                 type="button"
-                onClick={() => setShowAddModal(false)}
-                className="p-1 text-slate-400 hover:text-slate-600"
+                onClick={() => setAppPickerMode(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleAddDeviceSubmit} className="p-6 space-y-4 text-xs">
-              <p className="text-slate-600 leading-relaxed text-[11px]">
-                أدخل معرّف الجهاز (<code className="font-mono font-bold">UID</code>) المنسوخ من شاشة هاتف المندوب بعد فتحه وتسجيله في Firebase.
-              </p>
+            <div className="p-6 space-y-4 max-h-[70vh] overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto">
+                {CURATED_APP_CATALOG.filter(
+                  (a) => !HARDCODED_PROTECTED_PACKAGES[a.packageName] && !a.isProtected
+                ).map((item) => {
+                  const checked = pickedPackages.has(item.packageName);
+                  return (
+                    <label
+                      key={item.packageName}
+                      className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-xs cursor-pointer ${
+                        checked
+                          ? 'bg-blue-50 border-blue-300 font-bold text-blue-950'
+                          : 'bg-white border-slate-200 text-slate-800 hover:bg-slate-50'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const next = new Set(pickedPackages);
+                          if (next.has(item.packageName)) next.delete(item.packageName);
+                          else next.add(item.packageName);
+                          setPickedPackages(next);
+                        }}
+                        className="w-4 h-4 rounded border-slate-300 text-blue-600"
+                      />
+                      <span className="truncate">{item.nameAr}</span>
+                    </label>
+                  );
+                })}
+              </div>
 
-              <div>
-                <label className="block text-slate-700 font-bold mb-1">
-                  معرّف الجهاز (UID) <span className="text-red-600">*</span>
+              <div className="pt-2 border-t border-slate-100 space-y-2">
+                <label className="block text-xs font-bold text-slate-700">
+                  أو أضف معرف حزمة مخصص:
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={manualUid}
-                  onChange={(e) => setManualUid(e.target.value)}
-                  placeholder="مثال: AbCdEf123_XyZ"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={customBulkPkg}
+                    onChange={(e) => setCustomBulkPkg(e.target.value)}
+                    placeholder="com.example.app"
+                    className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-slate-300"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomBulkPkg}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-white cursor-pointer"
+                  >
+                    إضافة
+                  </button>
+                </div>
+                {customBulkError && (
+                  <p className="text-xs text-red-600">{customBulkError}</p>
+                )}
               </div>
+            </div>
 
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">اسم الجهاز الإداري</label>
-                <input
-                  type="text"
-                  value={newDeviceName}
-                  onChange={(e) => setNewDeviceName(e.target.value)}
-                  placeholder="مثال: سيارة مبيعات القصيم 02"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">اسم المندوب المسؤول</label>
-                <input
-                  type="text"
-                  value={newRepName}
-                  onChange={(e) => setNewRepName(e.target.value)}
-                  placeholder="مثال: خالد الحربي"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                />
-              </div>
-
-              {addError && <p className="text-red-600 text-xs font-semibold">{addError}</p>}
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 border border-slate-300 rounded-lg font-semibold text-slate-700 hover:bg-slate-50"
-                >
-                  إلغاء
-                </button>
-                <button
-                  type="submit"
-                  disabled={submittingAdd}
-                  className="px-5 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white rounded-lg font-bold"
-                >
-                  اعتماد وحفظ
-                </button>
-              </div>
-            </form>
+            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAppPickerMode(null)}
+                className="px-4 py-2 rounded-lg text-xs font-bold border border-slate-300 text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={pickedPackages.size === 0}
+                onClick={() => {
+                  const mode = appPickerMode;
+                  const pkgs = Array.from(pickedPackages);
+                  setAppPickerMode(null);
+                  setBulkModalConfig({
+                    actionType: mode,
+                    actionParams: { packages: pkgs },
+                  });
+                }}
+                className="px-5 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 cursor-pointer"
+              >
+                متابعة المعاينة ({pickedPackages.size} تطبيق)
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Device Detail Drawer */}
-      {activeDrawerDevice && (
-        <DeviceDetailDrawer
-          device={activeDrawerDevice}
-          onClose={() => setSelectedDeviceUid(null)}
-          auditLogs={auditLogs}
-          db={db}
-          actor={actor}
-          onSavePolicy={onSavePolicy}
-          onSaveMetadata={onSaveMetadata}
-          onToggleApproval={(uid, approved) => onToggleApproval(uid, approved)}
-        />
-      )}
-
-      {/* Bulk Action Modal */}
-      {bulkModalOpen && (
+      {/* Bulk Action Execution Modal */}
+      {bulkModalConfig && (
         <BulkActionModal
-          isOpen={bulkModalOpen}
-          onClose={() => setBulkModalOpen(false)}
-          devices={devices}
-          selectedUids={Array.from(selectedUids)}
-          actionType={bulkActionType}
-          actionParams={bulkActionParams}
+          isOpen={true}
+          onClose={() => setBulkModalConfig(null)}
+          devices={activeDevices}
+          selectedUids={Array.from(selectedUids).filter(uid => activeDevices.some(d => d.uid === uid))}
+          actionType={bulkModalConfig.actionType}
+          actionParams={bulkModalConfig.actionParams}
           db={db}
           actor={actor}
-          onFinished={() => setSelectedUids(new Set())}
+          onFinished={() => {
+            setSelectedUids(new Set());
+          }}
         />
       )}
     </div>

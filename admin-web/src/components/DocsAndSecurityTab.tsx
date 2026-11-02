@@ -1,18 +1,10 @@
 import React, { useState } from 'react';
-import {
-  Copy,
-  Check,
-  Database,
-  ShieldCheck,
-  Terminal,
-  Rocket,
-  CheckCircle2,
-  Clock,
-} from 'lucide-react';
+import { Shield, Copy, Check, Database, AlertTriangle, FileText } from 'lucide-react';
 
-const PROPOSED_RULES_TEXT = `rules_version = '2';
+export const PROPOSED_RULES_TEXT = `rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Global default-deny safety net
     match /{document=**} {
       allow read, write: if false;
     }
@@ -40,6 +32,9 @@ service cloud.firestore {
         && request.auth.token.email_verified == true;
     }
 
+    // Administrator authorization requires a named, email-verified user AND either:
+    // 1. A trusted Custom Claim (request.auth.token.admin == true) set via Firebase Admin SDK, OR
+    // 2. An active record in /admins/{uid} provisioned via Firebase Console / Admin SDK (client writes forbidden).
     function isAdmin() {
       return isNamedVerifiedUser() && (
         (request.auth.token.keys().hasAny(['admin']) && request.auth.token.admin == true)
@@ -56,46 +51,17 @@ service cloud.firestore {
         && data.approved is bool;
     }
 
-    function isValidPkg(pkg) {
-      return pkg is string
-        && pkg.size() >= 3
-        && pkg.size() <= 150
-        && pkg.matches('^[A-Za-z][A-Za-z0-9_]*(\\\\.[A-Za-z][A-Za-z0-9_]*)+$')
-        && !(pkg in [
-          'com.company.mdmagent',
-          'com.android.settings',
-          'com.android.systemui',
-          'com.google.android.gms',
-          'com.google.android.gsf',
-          'com.android.vending'
-        ]);
+    // Round-trip equality rejects non-strings and separator injection without 50 function calls.
+    function validJoinedApps(apps) {
+      let joined = apps.join(',');
+      return joined.split(',') == apps
+        && joined.matches('^[A-Za-z][A-Za-z0-9_]*(\\\\.[A-Za-z][A-Za-z0-9_]*)+(,[A-Za-z][A-Za-z0-9_]*(\\\\.[A-Za-z][A-Za-z0-9_]*)+)*$')
+        && joined.matches('^[^,]{3,150}(,[^,]{3,150})*$');
     }
-
-    function validPkgAt(apps, idx) {
-      return apps.size() <= idx || isValidPkg(apps[idx]);
-    }
-
-    function validAppsBatch(apps, offset) {
-      return validPkgAt(apps, offset + 0)
-        && validPkgAt(apps, offset + 1)
-        && validPkgAt(apps, offset + 2)
-        && validPkgAt(apps, offset + 3)
-        && validPkgAt(apps, offset + 4)
-        && validPkgAt(apps, offset + 5)
-        && validPkgAt(apps, offset + 6)
-        && validPkgAt(apps, offset + 7)
-        && validPkgAt(apps, offset + 8)
-        && validPkgAt(apps, offset + 9);
-    }
-
     function areAllBlockedAppsValid(apps) {
-      return apps is list
-        && apps.size() <= 50
-        && validAppsBatch(apps, 0)
-        && validAppsBatch(apps, 10)
-        && validAppsBatch(apps, 20)
-        && validAppsBatch(apps, 30)
-        && validAppsBatch(apps, 40);
+      return apps is list && apps.size() <= 50
+        && !apps.hasAny(['com.company.mdmagent','com.android.settings','com.android.systemui','com.google.android.gms','com.google.android.gsf','com.android.vending'])
+        && (apps.size() == 0 || validJoinedApps(apps));
     }
 
     function isValidPolicy(data) {
@@ -126,12 +92,19 @@ service cloud.firestore {
 
     function isValidDeviceMetadata(data) {
       return data.keys().hasAll(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email'])
-        && data.keys().hasOnly(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email'])
+        && data.keys().hasOnly(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email', 'archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])
         && data.device_name is string && data.device_name.size() <= 120
         && data.rep_name is string && data.rep_name.size() <= 120
         && data.updated_at == request.time
         && data.updated_by_uid is string && data.updated_by_uid == request.auth.uid
-        && data.updated_by_email is string && data.updated_by_email == request.auth.token.email;
+        && data.updated_by_email is string && data.updated_by_email == request.auth.token.email
+        && (!('archived' in data) || (
+          data.archived is bool
+          && ((request.method == 'update' && !data.diff(resource.data).affectedKeys().hasAny(['archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])) || (
+          (!('archived_at' in data) || data.archived_at == null || data.archived_at == request.time)
+          && (!('archived_by_uid' in data) || data.archived_by_uid == null || (data.archived_by_uid is string && data.archived_by_uid == request.auth.uid))
+          && (!('archived_by_email' in data) || data.archived_by_email == null || (data.archived_by_email is string && data.archived_by_email == request.auth.token.email))))
+        ));
     }
 
     function isValidAuditLog(data) {
@@ -140,13 +113,14 @@ service cloud.firestore {
         && data.actor_uid is string && data.actor_uid == request.auth.uid
         && data.actor_email is string && data.actor_email == request.auth.token.email
         && data.target_uid is string && isValidId(data.target_uid)
-        && data.action is string && data.action in ['approve_device', 'revoke_approval', 'create_policy', 'update_policy', 'update_metadata']
+        && data.action is string && data.action in ['approve_device', 'revoke_approval', 'create_policy', 'update_policy', 'update_metadata', 'archive_device', 'restore_device']
         && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500
         && data.before is map
         && data.after is map
         && data.created_at == request.time;
     }
 
+    // 1. Device Enrollment Records
     match /enrollments/{uid} {
       allow get: if isValidId(uid) && (own(uid) || isAdmin());
       allow list: if isAdmin();
@@ -154,6 +128,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // 2. Device Policies (Contract with Android Agent com.company.mdmagent)
     match /policies/{uid} {
       allow get: if isValidId(uid) && (approved(uid) || isAdmin());
       allow list: if isAdmin();
@@ -165,6 +140,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // 3. Self-Reported Device Execution Status (Written by Approved Device Only; Read by Device & Admin)
     match /deviceStatus/{uid} {
       allow get: if isValidId(uid) && (approved(uid) || isAdmin());
       allow list: if isAdmin();
@@ -172,13 +148,15 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // 4. Separate Administrative Metadata (Device Label & Sales Representative Name)
     match /deviceMetadata/{uid} {
-      allow get: if isValidId(uid) && isAdmin();
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
       allow list: if isAdmin();
       allow create, update: if isValidId(uid) && isValidDeviceMetadata(request.resource.data) && isAdmin();
       allow delete: if false;
     }
 
+    // 5. Append-Only Administrative Audit Log (Protected from modification/deletion, though rules do not force every admin write to create a log)
     match /auditLogs/{logId} {
       allow get: if isValidId(logId) && isAdmin();
       allow list: if isAdmin();
@@ -186,10 +164,55 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    // 6. Server-Managed Administrator Registry (Read-Only for Verification; Never Client-Writable)
     match /admins/{uid} {
       allow get: if isValidId(uid) && ((isNamedVerifiedUser() && own(uid)) || isAdmin());
       allow list: if isAdmin();
       allow create, update, delete: if false;
+    }
+
+    function validKioskStatus(d) {
+      return d.keys().hasAll(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
+        && d.keys().hasOnly(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
+        && d.configured_revision is int && d.configured_revision >= 0
+        && d.active is bool && d.install_blocked is bool && d.maintenance is bool
+        && d.error is string && d.error.size() <= 1000 && d.reported_at == request.time;
+    }
+    match /kioskStatus/{uid} {
+      allow get: if approved(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if approved(uid) && validKioskStatus(request.resource.data);
+      allow delete: if false;
+    }
+    function validKiosk(d) {
+      return d.keys().hasAll(['schema_version','revision','enabled','allowed_apps','exit_salt','exit_hash'])
+        && d.keys().hasOnly(['schema_version','revision','enabled','allowed_apps','exit_salt','exit_hash'])
+        && d.schema_version == 1 && d.revision is int && d.revision > 0 && d.enabled is bool
+        && areAllBlockedAppsValid(d.allowed_apps) && (!d.enabled || d.allowed_apps.size() > 0)
+        && d.exit_salt is string && d.exit_salt.matches('^[a-f0-9]{32}$')
+        && d.exit_hash is string && d.exit_hash.matches('^[a-f0-9]{64}$');
+    }
+    match /kioskPolicies/{uid} {
+      allow get: if approved(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isAdmin() && validKiosk(request.resource.data);
+      allow update: if isAdmin() && validKiosk(request.resource.data) && request.resource.data.revision > resource.data.revision;
+      allow delete: if false;
+    }
+
+    // 7. Device Application Inventory (Published by approved Android Agent 0.3.1+; Read by Device & Admin)
+    match /deviceAppInventory/{uid} {
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) && approved(uid);
+      allow delete: if false;
+
+      match /batches/{batchId} {
+        allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+        allow list: if isAdmin();
+        allow create, update: if isValidId(uid) && isValidId(batchId) && approved(uid);
+        allow delete: if false;
+      }
     }
   }
 }`;
@@ -198,227 +221,76 @@ export const DocsAndSecurityTab: React.FC = () => {
   const [copiedRules, setCopiedRules] = useState(false);
 
   const handleCopyRules = () => {
-    void navigator.clipboard.writeText(PROPOSED_RULES_TEXT);
+    navigator.clipboard.writeText(PROPOSED_RULES_TEXT);
     setCopiedRules(true);
     setTimeout(() => setCopiedRules(false), 2000);
   };
 
   return (
     <div className="space-y-6">
-      {/* Section 1: Extracted Data Contract from van-sales-mdm */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-        <div className="flex items-center gap-2 border-b border-slate-200 pb-3">
-          <Database className="w-5 h-5 text-blue-700" />
-          <h3 className="text-base font-bold text-slate-900">
-            1. عقد البيانات الفعلي المستخرج من مستودع van-sales-mdm
-          </h3>
+      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 flex items-start gap-4">
+        <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+          <AlertTriangle className="w-5 h-5" />
         </div>
-
-        <p className="text-xs text-slate-600 leading-relaxed">
-          تم فحص ملفات المستودع المرفق (<code className="font-mono">README.md</code>،{' '}
-          <code className="font-mono">firestore.rules</code>،{' '}
-          <code className="font-mono">SyncEngine.java</code>،{' '}
-          <code className="font-mono">Policy.java</code>،{' '}
-          <code className="font-mono">AppRestrictions.java</code>،{' '}
-          <code className="font-mono">MainActivity.java</code>) والتقيد التام بالتحقق الصارم من
-          الأنواع (دون تحويل النصوص مثل <code className="font-mono">&quot;false&quot;</code> إلى{' '}
-          <code className="font-mono">true</code> ودون تصفير الحقول التالفة بصمت):
-        </p>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-            <h4 className="font-bold text-slate-900 font-mono" dir="ltr">
-              1. enrollments/{'{uid}'}
-            </h4>
-            <p className="text-slate-600">
-              يقرؤه الهاتف عبر <code className="font-mono">Source.SERVER</code> قبل أي مزامنة.
-            </p>
-            <pre dir="ltr" className="p-2.5 bg-slate-900 text-slate-100 rounded text-[11px] font-mono">
-              {`{\n  "approved": true // boolean صريح فقط\n}`}
-            </pre>
-          </div>
-
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-            <h4 className="font-bold text-slate-900 font-mono" dir="ltr">
-              2. policies/{'{uid}'}
-            </h4>
-            <p className="text-slate-600">
-              يتحقق منه <code className="font-mono">Policy.parse()</code> وقواعد Firestore لجميع
-              عناصر <code className="font-mono">blocked_apps</code> حتى الحد الأقصى (50 عنصرًا).
-            </p>
-            <pre dir="ltr" className="p-2.5 bg-slate-900 text-slate-100 rounded text-[11px] font-mono">
-              {`{\n  "schema_version": 1,      // int == 1\n  "revision": 1,            // int >= 1\n  "block_tethering": false, // bool\n  "blocked_apps": []        // string[] (0..50)\n}`}
-            </pre>
-          </div>
-
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-            <h4 className="font-bold text-slate-900 font-mono" dir="ltr">
-              3. deviceStatus/{'{uid}'}
-            </h4>
-            <p className="text-slate-600">
-              يكتبه الهاتف فقط بعد التحقق من <code className="font-mono">DevicePolicyManager</code>.
-            </p>
-            <pre
-              dir="ltr"
-              className="p-2.5 bg-slate-900 text-slate-100 rounded text-[11px] font-mono overflow-x-auto"
-            >
-              {`{\n  "device_owner": true,         // bool\n  "applied_revision": 1,        // int >= 0\n  "tethering_restricted": true, // bool\n  "last_seen": SERVER_TIME,     // timestamp\n  "model": "TECNO POVA 5",      // string <= 200\n  "android_sdk": 33,            // int\n  "battery_percent": 70,        // int\n  "error": "",                  // string <= 1000\n  "agent_version": "0.1.0-pilot"// string <= 40\n}`}
-            </pre>
-          </div>
-
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-            <h4 className="font-bold text-slate-900 font-mono" dir="ltr">
-              4. admins/{'{ADMIN_AUTH_UID}'}
-            </h4>
-            <p className="text-slate-600">
-              تُنشأ يدويًا من مالك المشروع في Firebase Console بمعرّف حساب المسؤول في Authentication
-              (وليس UID الهاتف):
-            </p>
-            <pre
-              dir="ltr"
-              className="p-2.5 bg-slate-900 text-slate-100 rounded text-[11px] font-mono overflow-x-auto"
-            >
-              {`// admins/{ADMIN_AUTH_UID}\n{\n  "active": true,\n  "email": "mashhoor.info@gmail.com"\n}`}
-            </pre>
-          </div>
+        <div className="space-y-2 text-sm text-amber-900">
+          <h3 className="font-bold text-base">تشخيص خطأ صلاحيات «شاشة الشركة» (Missing or insufficient permissions)</h3>
+          <p className="leading-relaxed">
+            عند ظهور رسالة <span className="font-semibold">«تعذر قراءة حالة الشاشة بسبب صلاحيات قاعدة البيانات»</span> داخل تبويب شاشة الشركة، فهذا يعني أن ملف القواعد المنشور حاليًا في مشروع Firebase (<code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">vansales-mdm</code>) يسبق تحديث <strong>0.4.0-pilot</strong> ولا يتضمن بعد تصاريح القراءة والكتابة لمساري <code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">kioskPolicies/&#123;uid&#125;</code> و <code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">kioskStatus/&#123;uid&#125;</code>.
+          </p>
+          <p className="leading-relaxed font-medium">
+            الحل الآمن: انسخ نص قواعد الأمان الكامل أدناه وانشره في <strong>Firebase Console &rarr; Firestore Database &rarr; Rules</strong> (أو عبر CLI) مع الحفاظ على قصر القراءة والكتابة الإدارية على <code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">isAdmin()</code> والجهاز المعتمد <code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">approved(uid)</code> دون فتح أي وصول عام.
+          </p>
         </div>
       </div>
 
-      {/* Section 2: Proposed Firestore Rules */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-emerald-700" />
-            <h3 className="text-base font-bold text-slate-900">
-              2. قواعد Firestore المحلية المحدثة (firestore.rules) — يجب نشرها في Console
-            </h3>
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Shield className="w-5 h-5 text-blue-600" />
+            <div>
+              <h3 className="text-base font-bold text-slate-900">ملف قواعد الأمان الكامل (firestore.rules — 0.4.0-pilot)</h3>
+              <p className="text-xs text-slate-500">يشمل حماية الأجهزة، السياسات، سجل التطبيقات، وشاشة الشركة (Kiosk Mode)</p>
+            </div>
           </div>
           <button
             type="button"
             onClick={handleCopyRules}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition-colors cursor-pointer"
           >
-            {copiedRules ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copiedRules ? 'تم نسخ القواعد' : 'نسخ firestore.rules'}</span>
+            {copiedRules ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+            {copiedRules ? 'تم نسخ القواعد بالكامل' : 'نسخ ملف firestore.rules'}
           </button>
         </div>
+        <div className="p-4 bg-slate-950 text-slate-100 overflow-x-auto max-h-[460px]">
+          <pre className="text-xs font-mono leading-relaxed" dir="ltr">{PROPOSED_RULES_TEXT}</pre>
+        </div>
+      </div>
 
-        <p className="text-xs text-slate-600 leading-relaxed">
-          <strong>تنبيه مهم:</strong> القواعد أدناه محفوظة محليًا في ملف{' '}
-          <code className="font-mono">firestore.rules</code> ولم يتم نشرها تلقائيًا على الإنتاج. يجب
-          نسخها ولصقها في <strong>Firebase Console → Firestore Database → Rules → Publish</strong>{' '}
-          حتى تعمل آلية <code className="font-mono">admins/{'{uid}'}</code> وصلاحيات لوحة الإدارة.
-        </p>
-
-        <pre
-          dir="ltr"
-          className="p-4 bg-slate-900 text-slate-100 rounded-xl text-[11px] font-mono overflow-x-auto max-h-96 leading-relaxed"
-        >
-          {PROPOSED_RULES_TEXT}
-        </pre>
-
-        <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2 text-xs">
-          <div className="font-bold text-slate-900 flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-slate-700" />
-            <span>تشغيل اختبارات المحاكي (Firestore Emulator Tests):</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-xs space-y-2">
+          <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
+            <Database className="w-4 h-4 text-blue-600" />
+            <span>مسارات البيانات المعتمدة في 0.4.0-pilot</span>
           </div>
-          <pre dir="ltr" className="p-2.5 bg-slate-900 text-slate-100 rounded text-[11px] font-mono">
-            {`firebase emulators:exec --only firestore "node --test tests/rules.test.mjs"`}
-          </pre>
-        </div>
-      </div>
-
-      {/* Section 3: Vercel Deployment Instructions */}
-      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-        <div className="flex items-center gap-2 border-b border-slate-200 pb-3">
-          <Rocket className="w-5 h-5 text-blue-700" />
-          <h3 className="text-base font-bold text-slate-900">
-            3. تعليمات النشر على Vercel وإعداد النطاقات المعتمدة
-          </h3>
-        </div>
-
-        <ol className="list-decimal list-inside space-y-2 text-xs text-slate-700 leading-relaxed">
-          <li>
-            ارفع المستودع إلى GitHub (مع التأكد من عدم رفع أي ملف <code className="font-mono">.env</code>{' '}
-            أو مفاتيح Service Account).
-          </li>
-          <li>
-            في <span className="font-semibold text-slate-900">Vercel</span> اختر{' '}
-            <span className="font-semibold">Add New Project</span> واستورد المستودع (
-            <code className="font-mono">Framework: Vite</code>،{' '}
-            <code className="font-mono">Build: npm run build</code>،{' '}
-            <code className="font-mono">Output: dist</code>).
-          </li>
-          <li>
-            أضف متغيرات <code className="font-mono">VITE_FIREBASE_*</code> في Environment Variables
-            داخل Vercel.
-          </li>
-          <li>
-            أضف نطاق Vercel النهائي في{' '}
-            <span className="font-semibold text-slate-900">
-              Firebase Console → Authentication → Settings → Authorized domains
-            </span>
-            .
-          </li>
-        </ol>
-      </div>
-
-      {/* Section 4: Clear Report */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
-          <h3 className="text-sm font-bold text-emerald-900 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-            <span>ما تم تنفيذه وإصلاحه في الكود</span>
-          </h3>
-          <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
-            <li>
-              إضافة زر «إرسال رسالة تأكيد البريد» (<code className="font-mono">sendEmailVerification</code>)
-              وزر «أكدت بريدي — تحقق الآن» (<code className="font-mono">reload</code> + تجديد
-              التوكن + إعادة تقييم الصلاحية).
-            </li>
-            <li>
-              تشخيص دقيق لوثيقة <code className="font-mono">admins/{'{uid}'}</code> عبر{' '}
-              <code className="font-mono">getDocFromServer</code> يميز بين عدم وجود الوثيقة، و
-              <code className="font-mono">permission-denied</code>، وانقطاع الشبكة، وعدم توثيق
-              البريد.
-            </li>
-            <li>
-              إعادة تهيئة خدمات Firebase فعليًا عند تغيير الإعدادات وإزالة قراءة{' '}
-              <code className="font-mono">test/connection</code>.
-            </li>
-            <li>
-              التحقق الصارم من الأنواع دون <code className="font-mono">Boolean(value)</code>، وكشف
-              تعارض التعديل المتزامن بين المسؤولين، وفحص جميع الـ 50 عنصرًا في{' '}
-              <code className="font-mono">blocked_apps</code> داخل <code className="font-mono">firestore.rules</code>.
-            </li>
+          <ul className="text-xs text-slate-600 space-y-1.5 leading-relaxed list-disc list-inside">
+            <li>الاعتماد والتسجيل: <code className="font-mono text-slate-800" dir="ltr">enrollments/&#123;uid&#125;</code></li>
+            <li>سياسة الحظر ومشاركة الإنترنت: <code className="font-mono text-slate-800" dir="ltr">policies/&#123;uid&#125;</code></li>
+            <li>تقرير حالة الجهاز: <code className="font-mono text-slate-800" dir="ltr">deviceStatus/&#123;uid&#125;</code></li>
+            <li>جرد تطبيقات الهاتف الفعلي: <code className="font-mono text-slate-800" dir="ltr">deviceAppInventory/&#123;uid&#125;</code></li>
+            <li>إعدادات وحالة شاشة الشركة: <code className="font-mono text-slate-800" dir="ltr">kioskPolicies/&#123;uid&#125;</code> و <code className="font-mono text-slate-800" dir="ltr">kioskStatus/&#123;uid&#125;</code></li>
           </ul>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
-          <h3 className="text-sm font-bold text-amber-900 flex items-center gap-2">
-            <Clock className="w-4 h-4 text-amber-600" />
-            <span>الإجراءات اليدوية المطلوبة منك في Firebase Console</span>
-          </h3>
-          <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-700 leading-relaxed">
-            <li>
-              <strong>نشر القواعد:</strong> نسخ محتوى <code className="font-mono">firestore.rules</code>{' '}
-              ونشره في Firebase Console لمشروع <code className="font-mono">vansales-mdm</code>.
-            </li>
-            <li>
-              <strong>تأكيد البريد الإلكتروني:</strong> الضغط على «إرسال رسالة تأكيد البريد» من
-              الشاشة وتفعيل الرابط المرسل إلى <code className="font-mono">mashhoor.info@gmail.com</code>.
-            </li>
-            <li>
-              <strong>إنشاء وثيقة المسؤول:</strong> إنشاء المستند{' '}
-              <code className="font-mono">admins/{'{ADMIN_AUTH_UID}'}</code> في Firestore بالحقلين{' '}
-              <code className="font-mono">active: true</code> (boolean) و{' '}
-              <code className="font-mono">email: &quot;mashhoor.info@gmail.com&quot;</code>.
-            </li>
-            <li>
-              <strong>حدود سجل التدقيق الحالية:</strong> القواعد تمنع تعديل أو حذف{' '}
-              <code className="font-mono">auditLogs</code>، لكنها لا تُلزم كل كتابة إدارية خارج
-              الواجهة بإنشاء سجل مقابل (يتطلب ذلك Cloud Functions لتدقيق خادمي كامل).
-            </li>
+        <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-xs space-y-2">
+          <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
+            <FileText className="w-4 h-4 text-emerald-600" />
+            <span>شروط الأمان الملزمة</span>
+          </div>
+          <ul className="text-xs text-slate-600 space-y-1.5 leading-relaxed list-disc list-inside">
+            <li>التحقق من البريد المؤكد للمسؤول ووجود وثيقة نشطة في <code className="font-mono text-slate-800" dir="ltr">admins/&#123;uid&#125;</code>.</li>
+            <li>منع حظر الحزم الأساسية للنظام أو وكيل الإدارة.</li>
+            <li>اشتراط زيادة رقم الإصدار (<code className="font-mono text-slate-800" dir="ltr">revision</code>) عند كل تحديث سياسة أو شاشة شركة.</li>
+            <li>حفظ كلمة مرور صيانة شاشة الشركة كـ PBKDF2-HMAC-SHA256 (<code className="font-mono text-slate-800" dir="ltr">exit_salt</code> + <code className="font-mono text-slate-800" dir="ltr">exit_hash</code>).</li>
           </ul>
         </div>
       </div>

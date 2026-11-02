@@ -1,1237 +1,1844 @@
-import {KioskPanel} from './KioskPanel';
 import React, { useState, useEffect, useMemo } from 'react';
-import {
-  X,
-  Smartphone,
-  Shield,
-  Wifi,
-  WifiOff,
-  History,
-  Terminal,
-  CheckCircle2,
-  Clock,
-  AlertTriangle,
-  Search,
-  Plus,
-  Trash2,
-  Ban,
-  Check,
-  Save,
-  RotateCcw,
-  Battery,
-  Layers,
-  Info,
-  Wrench,
-  ShieldAlert,
-} from 'lucide-react';
 import type { Firestore } from 'firebase/firestore';
-import type {
-  AdminIdentity,
+import {
+  MergedDeviceRecord,
   AuditLogDoc,
   DeviceAppInventoryDoc,
-  DeviceAppItem,
-  MergedDeviceRecord,
+  AdminIdentity,
 } from '../types/mdm';
-import {
-  formatAndroidSdk,
-  formatLastSeenAr,
-  HARDCODED_PROTECTED_PACKAGES,
-  MAX_BLOCKED_APPS,
-  sanitizeManualUid,
-  validatePackageName,
-} from '../utils/validation';
-import {
-  CURATED_APP_CATALOG,
-  lookupAppInfo,
-  searchCuratedCatalog,
-} from '../utils/appCatalog';
-import {
-  subscribeToDeviceAppInventory,
-} from '../services/mdmService';
 import {
   ApprovalBadge,
   DeviceOwnerBadge,
   EnforcementBadge,
   StaleConnectionBadge,
 } from './StatusBadges';
+import {
+  HARDCODED_PROTECTED_PACKAGES,
+  MAX_BLOCKED_APPS,
+  validatePackageName,
+  formatTimestampAr,
+  formatLastSeenAr,
+  formatAndroidSdk,
+} from '../utils/validation';
+import {
+  CURATED_APP_CATALOG,
+  lookupAppInfo,
+} from '../utils/appCatalog';
+import {
+  getDeviceFriendlyName,
+  formatEnforcementSummaryAr,
+  formatAuditLogSummaryAr,
+} from '../utils/presentation';
+import {
+  subscribeToDeviceAppInventory,
+  saveDeviceMetadata,
+  setDeviceApproval,
+  saveDevicePolicyTransaction,
+  setDeviceArchivedStatus,
+} from '../services/mdmService';
+import { KioskPanel } from './KioskPanel';
+import {
+  Smartphone,
+  Shield,
+  WifiOff,
+  AppWindow,
+  Save,
+  Plus,
+  AlertCircle,
+  CheckCircle2,
+  History,
+  Search,
+  Lock,
+  Code2,
+  Copy,
+  Check,
+  ArrowRight,
+  ChevronLeft,
+  SlidersHorizontal,
+  AlertTriangle,
+  Archive,
+  ArchiveRestore,
+} from 'lucide-react';
+
+export type DeviceManagementTabId = 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history';
 
 interface DeviceDetailDrawerProps {
-  device: MergedDeviceRecord;
-  onClose: () => void;
+  device: MergedDeviceRecord | null;
+  allDevices?: MergedDeviceRecord[];
   auditLogs: AuditLogDoc[];
   db: Firestore;
   actor: AdminIdentity;
-  onSavePolicy: (
-    uid: string,
-    payload: {
-      block_tethering: boolean;
-      blocked_apps: string[];
-      expectedCurrentRevision: number | null;
-      allowRepairCorrupted?: boolean;
-    }
-  ) => Promise<{ savedRevision: number }>;
-  onSaveMetadata: (uid: string, deviceName: string, repName: string) => Promise<void>;
-  onToggleApproval: (uid: string, approved: boolean) => Promise<void>;
+  activeTab?: DeviceManagementTabId;
+  onTabChange?: (tab: DeviceManagementTabId) => void;
+  discardDraftSignal?: number;
+  onClose: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onNavigateAdvancedSettings?: () => void;
 }
 
-type DrawerTab = 'kiosk' | 'overview' | 'apps' | 'tethering' | 'audit' | 'technical';
+const ACTION_LABELS: Record<string, string> = {
+  approve_device: 'اعتماد جهاز',
+  revoke_approval: 'سحب اعتماد جهاز',
+  create_policy: 'إنشاء سياسة جهاز',
+  update_policy: 'تحديث سياسة جهاز',
+  update_metadata: 'تعديل بيانات التعريف',
+  archive_device: 'إزالة جهاز من القائمة (أرشفة)',
+  restore_device: 'استعادة جهاز إلى القائمة',
+};
 
 export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
   device,
-  onClose,
+  allDevices = [],
   auditLogs,
   db,
   actor,
-  onSavePolicy,
-  onSaveMetadata,
-  onToggleApproval,
+  activeTab: controlledActiveTab,
+  onTabChange,
+  discardDraftSignal = 0,
+  onClose,
+  onDirtyChange,
+  onNavigateAdvancedSettings,
 }) => {
-  const [activeTab, setActiveTab] = useState<DrawerTab>('overview');
+  const [internalActiveTab, setInternalActiveTab] = useState<DeviceManagementTabId>('overview');
+  const activeTab = controlledActiveTab ?? internalActiveTab;
+  const [localDiscardSignal, setLocalDiscardSignal] = useState(0);
+  const effectiveDiscardSignal = discardDraftSignal + localDiscardSignal;
 
-  // Policy Form State
-  const [loadedRevision, setLoadedRevision] = useState<number | null>(null);
-  const [allowTethering, setAllowTethering] = useState<boolean>(true); // allowTethering = !block_tethering
-  const [blockedApps, setBlockedApps] = useState<string[]>([]);
-  const [isDirty, setIsDirty] = useState(false);
-  const [savingPolicy, setSavingPolicy] = useState(false);
-  const [policyFeedback, setPolicyFeedback] = useState<{
-    type: 'success' | 'error';
-    message: string;
-  } | null>(null);
-
-  // App Inventory real-time state from deviceAppInventory/{uid}
-  const [inventory, setInventory] = useState<DeviceAppInventoryDoc | null>(null);
-  const [inventoryLoading, setInventoryLoading] = useState(true);
-
-  // App search & filter in Apps Tab
-  const [appSearch, setAppSearch] = useState('');
-  const [appFilter, setAppFilter] = useState<'all' | 'blocked' | 'allowed' | 'protected' | 'pending'>('all');
-  const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
-
-  // Quick Catalog Picker Modal / Section
-  const [showCatalogPicker, setShowCatalogPicker] = useState(false);
-  const [catalogSearch, setCatalogSearch] = useState('');
-  const [customPackageInput, setCustomPackageInput] = useState('');
-  const [customPackageError, setCustomPackageError] = useState<string | null>(null);
-
-  // Metadata Edit State
-  const [editName, setEditName] = useState(device.metadata?.device_name || '');
-  const [editRep, setEditRep] = useState(device.metadata?.rep_name || '');
+  // Metadata form state
+  const [deviceName, setDeviceName] = useState('');
+  const [repName, setRepName] = useState('');
+  const [metaEdited, setMetaEdited] = useState(false);
+  const [metaError, setMetaError] = useState<string | null>(null);
+  const [metaSuccess, setMetaSuccess] = useState<string | null>(null);
   const [savingMeta, setSavingMeta] = useState(false);
-  const [metaFeedback, setMetaFeedback] = useState<string | null>(null);
 
-  // Stored corrupted policy repair toggle
-  const [repairMode, setRepairMode] = useState(false);
+  // Approval state
+  const [savingApproval, setSavingApproval] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [confirmRevokeApproval, setConfirmRevokeApproval] = useState(false);
 
-  // Sync form with device policy
-  useEffect(() => {
-    if (device.policy) {
-      setLoadedRevision(device.policy.revision);
-      setAllowTethering(!device.policy.block_tethering);
-      setBlockedApps([...device.policy.blocked_apps]);
-      setIsDirty(false);
-    } else {
-      setLoadedRevision(null);
-      setAllowTethering(true); // default: allowed
-      setBlockedApps([]);
-      setIsDirty(false);
+  // Policy form state
+  const [blockTethering, setBlockTethering] = useState(true);
+  const [blockedApps, setBlockedApps] = useState<string[]>([]);
+  const [policyEdited, setPolicyEdited] = useState(false);
+  const [pinnedPolicyRevision, setPinnedPolicyRevision] = useState<number | null>(null);
+  const [policyRevisionConflict, setPolicyRevisionConflict] = useState<{
+    pinned: number | null;
+    incoming: number | null;
+  } | null>(null);
+  const [newPackageInput, setNewPackageInput] = useState('');
+  const [showAddCustomModal, setShowAddCustomModal] = useState(false);
+  const [appSearchQuery, setAppSearchQuery] = useState('');
+  const [appFilter, setAppFilter] = useState<'all' | 'blocked' | 'allowed' | 'protected'>('all');
+  const [selectedPackages, setSelectedPackages] = useState<Set<string>>(new Set());
+  const [showPackageNames, setShowPackageNames] = useState(false);
+  const [policyError, setPolicyError] = useState<string | null>(null);
+  const [policySuccess, setPolicySuccess] = useState<string | null>(null);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const [copiedUid, setCopiedUid] = useState(false);
+  const [copiedDiag, setCopiedDiag] = useState(false);
+  const [copiedPkg, setCopiedPkg] = useState<string | null>(null);
+
+  // Child Kiosk dirty state
+  const [kioskDirty, setKioskDirty] = useState(false);
+
+  // Archiving state
+  const [showArchiveConfirmModal, setShowArchiveConfirmModal] = useState(false);
+  const [savingArchive, setSavingArchive] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveSuccess, setArchiveSuccess] = useState<string | null>(null);
+
+  const handleArchiveToggle = async (archived: boolean) => {
+    if (!device) return;
+    setSavingArchive(true);
+    setArchiveError(null);
+    setArchiveSuccess(null);
+    try {
+      await setDeviceArchivedStatus(db, device.uid, archived, actor);
+      setShowArchiveConfirmModal(false);
+      setArchiveSuccess(
+        archived
+          ? 'تمت إزالة الجهاز من القائمة الرئيسية بنجاح، ويمكن الوصول إليه عبر فلتر «الأجهزة المؤرشفة».'
+          : 'تمت استعادة الجهاز إلى القائمة الرئيسية بنجاح.'
+      );
+    } catch (err) {
+      setArchiveError(err instanceof Error ? err.message : 'تعذر تحديث حالة أرشفة الجهاز');
+    } finally {
+      setSavingArchive(false);
     }
-    setEditName(device.metadata?.device_name || '');
-    setEditRep(device.metadata?.rep_name || '');
-    setPolicyFeedback(null);
-    setMetaFeedback(null);
-  }, [device.uid, device.policy?.revision, device.policy?.block_tethering]);
+  };
 
-  // Subscribe to real-time app inventory
+  // Pending navigation confirmation when form has unsaved edits
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
+
+  // Real-time reported app inventory from Android 0.3.1+ agent
+  const [appInventory, setAppInventory] = useState<DeviceAppInventoryDoc | null>(null);
+  const [inventoryLoading, setInventoryLoading] = useState(false);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+
   useEffect(() => {
+    if (!device?.uid || !db) {
+      setAppInventory(null);
+      setInventoryError(null);
+      return;
+    }
     setInventoryLoading(true);
+    setInventoryError(null);
     const unsub = subscribeToDeviceAppInventory(db, device.uid, {
-      onData: (data) => {
-        setInventory(data);
+      onData: (record) => {
+        setAppInventory(record);
         setInventoryLoading(false);
       },
-      onError: () => {
+      onError: (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setInventoryError(msg);
         setInventoryLoading(false);
       },
     });
     return () => unsub();
-  }, [db, device.uid]);
+  }, [device?.uid, db]);
 
-  // Unified application list for the device:
-  // Combines:
-  // 1. Apps reported in actual inventory (if available)
-  // 2. Apps currently in the device's blocked_apps list (so they are always visible even if inventory hasn't reported them yet)
-  // 3. System protected apps
-  const combinedAppList = useMemo(() => {
+  // Sync local state when switching to a different device UID
+  useEffect(() => {
+    if (device) {
+      setDeviceName(device.metadata?.device_name ?? '');
+      setRepName(device.metadata?.rep_name ?? '');
+      setMetaEdited(false);
+      setMetaError(null);
+      setMetaSuccess(null);
+      setApprovalError(null);
+      setConfirmRevokeApproval(false);
+
+      setBlockTethering(device.policy?.block_tethering ?? true);
+      setBlockedApps(device.policy?.blocked_apps ? [...device.policy.blocked_apps] : []);
+      setPolicyEdited(false);
+      setPinnedPolicyRevision(device.policy?.revision ?? null);
+      setPolicyRevisionConflict(null);
+      setNewPackageInput('');
+      setAppSearchQuery('');
+      setAppFilter('all');
+      setSelectedPackages(new Set());
+      setPolicyError(null);
+      setPolicySuccess(null);
+      setKioskDirty(false);
+    }
+  }, [device?.uid]);
+
+  // Preserve admin drafts on incoming snapshots; update clean fields and flag revision conflict if dirty
+  useEffect(() => {
+    if (!device) return;
+    if (!metaEdited) {
+      setDeviceName(device.metadata?.device_name ?? '');
+      setRepName(device.metadata?.rep_name ?? '');
+    }
+    const incomingRev = device.policy?.revision ?? null;
+    if (!policyEdited) {
+      setBlockTethering(device.policy?.block_tethering ?? true);
+      setBlockedApps(device.policy?.blocked_apps ? [...device.policy.blocked_apps] : []);
+      setPinnedPolicyRevision(incomingRev);
+      setPolicyRevisionConflict(null);
+    } else if (incomingRev !== pinnedPolicyRevision) {
+      setPolicyRevisionConflict({
+        pinned: pinnedPolicyRevision,
+        incoming: incomingRev,
+      });
+    }
+  }, [
+    device?.metadata?.device_name,
+    device?.metadata?.rep_name,
+    device?.policy?.revision,
+    device?.policy?.block_tethering,
+    device?.policy?.blocked_apps,
+    metaEdited,
+    policyEdited,
+    pinnedPolicyRevision,
+  ]);
+
+  // Reset local drafts when parent discardDraftSignal increments
+  useEffect(() => {
+    if (discardDraftSignal > 0 && device) {
+      setDeviceName(device.metadata?.device_name ?? '');
+      setRepName(device.metadata?.rep_name ?? '');
+      setMetaEdited(false);
+      setMetaError(null);
+      setBlockTethering(device.policy?.block_tethering ?? true);
+      setBlockedApps(device.policy?.blocked_apps ? [...device.policy.blocked_apps] : []);
+      setPolicyEdited(false);
+      setPinnedPolicyRevision(device.policy?.revision ?? null);
+      setPolicyRevisionConflict(null);
+      setPolicyError(null);
+    }
+  }, [discardDraftSignal]);
+
+  // Dirty checks for Metadata & Policy
+  const isMetaDirty = useMemo(() => {
+    if (!device) return false;
+    return (
+      deviceName.trim() !== (device.metadata?.device_name ?? '') ||
+      repName.trim() !== (device.metadata?.rep_name ?? '')
+    );
+  }, [device, deviceName, repName]);
+
+  const isPolicyDirty = useMemo(() => {
+    if (!device) return false;
+    const savedTethering = device.policy?.block_tethering ?? true;
+    const savedBlocked = device.policy?.blocked_apps ?? [];
+    if (blockTethering !== savedTethering) return true;
+    if (blockedApps.length !== savedBlocked.length) return true;
+    const sortedA = [...blockedApps].sort();
+    const sortedB = [...savedBlocked].sort();
+    return JSON.stringify(sortedA) !== JSON.stringify(sortedB);
+  }, [device, blockTethering, blockedApps]);
+
+  const hasAnyUnsavedChanges = isMetaDirty || isPolicyDirty || kioskDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(hasAnyUnsavedChanges);
+  }, [hasAnyUnsavedChanges, onDirtyChange]);
+
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.(false);
+    };
+  }, [onDirtyChange]);
+
+  const deviceLogs = useMemo(() => {
+    if (!device) return [];
+    return auditLogs.filter((l) => l.target_uid === device.uid);
+  }, [device, auditLogs]);
+
+  const deviceMap = useMemo(() => {
+    const map = new Map<string, MergedDeviceRecord>();
+    allDevices.forEach((d) => map.set(d.uid, d));
+    if (device) map.set(device.uid, device);
+    return map;
+  }, [allDevices, device]);
+
+  // Unified app list for this device
+  const unifiedDeviceApps = useMemo(() => {
     const map = new Map<
       string,
       {
-        packageName: string;
-        appName: string;
-        category: string;
-        isBlocked: boolean;
+        package_name: string;
+        app_name: string;
+        categoryLabel: string;
+        description: string;
         isProtected: boolean;
-        protectionReason?: string;
-        reportedInInventory: boolean;
-        hasLauncherIcon: boolean;
-        isSystemApp: boolean;
-        isHiddenByAgent: boolean;
-        badgeBg: string;
-        badgeTextColor: string;
+        protectedReason: string | null;
+        isBlocked: boolean;
+        isInstalledOnDevice: boolean;
       }
     >();
 
-    // 1. Add apps from inventory if present
-    if (inventory?.apps) {
-      for (const item of inventory.apps) {
-        const info = lookupAppInfo(item.package_name);
-        map.set(item.package_name, {
-          packageName: item.package_name,
-          appName: item.app_name || info.nameAr,
-          category: info.category,
-          isBlocked: blockedApps.includes(item.package_name),
-          isProtected: item.is_protected || info.isProtected,
-          protectionReason: item.protection_reason || info.protectionReason,
-          reportedInInventory: true,
-          hasLauncherIcon: item.has_launcher_icon,
-          isSystemApp: item.is_system_app,
-          isHiddenByAgent: item.is_hidden_by_agent,
-          badgeBg: info.badgeBg,
-          badgeTextColor: info.badgeTextColor,
+    // 1. Add apps actually reported by the device (if inventory exists)
+    if (appInventory && Array.isArray(appInventory.apps)) {
+      for (const rep of appInventory.apps) {
+        const info = lookupAppInfo(rep.package_name);
+        const isHardcodedProtected =
+          Boolean(HARDCODED_PROTECTED_PACKAGES[rep.package_name]) || Boolean(rep.is_protected);
+        const isSystemNonLaunchable = Boolean(rep.is_system_app && !rep.has_launcher_icon);
+        const isProtected = isHardcodedProtected || isSystemNonLaunchable;
+
+        let protectedReason =
+          HARDCODED_PROTECTED_PACKAGES[rep.package_name] ||
+          rep.protection_reason ||
+          info.protectionReason ||
+          null;
+        if (!protectedReason && isHardcodedProtected) {
+          protectedReason = 'تطبيق أساسي أو مسؤول جهاز نشط؛ محمي من الحظر.';
+        } else if (!protectedReason && isSystemNonLaunchable) {
+          protectedReason = 'مكوّن نظام أساسي بدون واجهة تشغيل؛ محمي من الحظر.';
+        }
+
+        map.set(rep.package_name, {
+          package_name: rep.package_name,
+          app_name: rep.app_name || info.nameAr,
+          categoryLabel: rep.is_system_app ? 'تطبيق نظام' : 'مثبت على الهاتف',
+          description: info.descriptionAr,
+          isProtected,
+          protectedReason,
+          isBlocked: blockedApps.includes(rep.package_name),
+          isInstalledOnDevice: true,
         });
       }
     }
 
-    // 2. Ensure every currently blocked package is visible in the list even if not in inventory
+    // 2. Add any currently blocked apps not in reported inventory
     for (const pkg of blockedApps) {
       if (!map.has(pkg)) {
         const info = lookupAppInfo(pkg);
         map.set(pkg, {
-          packageName: pkg,
-          appName: info.nameAr,
-          category: info.category,
+          package_name: pkg,
+          app_name: info.nameAr,
+          categoryLabel: 'مضاف في قائمة الحظر',
+          description: info.descriptionAr,
+          isProtected: Boolean(HARDCODED_PROTECTED_PACKAGES[pkg]),
+          protectedReason: HARDCODED_PROTECTED_PACKAGES[pkg] || info.protectionReason || null,
           isBlocked: true,
-          isProtected: info.isProtected,
-          protectionReason: info.protectionReason,
-          reportedInInventory: false,
-          hasLauncherIcon: true,
-          isSystemApp: false,
-          isHiddenByAgent: false,
-          badgeBg: info.badgeBg,
-          badgeTextColor: info.badgeTextColor,
+          isInstalledOnDevice: false,
         });
       }
     }
 
-    // 3. Also include core system protected packages for full transparency
-    for (const [pkg, reason] of Object.entries(HARDCODED_PROTECTED_PACKAGES)) {
-      if (!map.has(pkg)) {
-        const info = lookupAppInfo(pkg);
-        map.set(pkg, {
-          packageName: pkg,
-          appName: info.nameAr,
-          category: 'system',
-          isBlocked: false,
-          isProtected: true,
-          protectionReason: reason,
-          reportedInInventory: false,
-          hasLauncherIcon: false,
-          isSystemApp: true,
-          isHiddenByAgent: false,
-          badgeBg: info.badgeBg,
-          badgeTextColor: info.badgeTextColor,
-        });
+    // 3. If no inventory has arrived yet, also show the curated catalog as reference suggestions
+    if (!appInventory || !Array.isArray(appInventory.apps) || appInventory.apps.length === 0) {
+      for (const item of CURATED_APP_CATALOG) {
+        if (!map.has(item.packageName)) {
+          map.set(item.packageName, {
+            package_name: item.packageName,
+            app_name: item.nameAr,
+            categoryLabel: 'دليل التطبيقات الشائعة',
+            description: item.descriptionAr,
+            isProtected: Boolean(HARDCODED_PROTECTED_PACKAGES[item.packageName] || item.isProtected),
+            protectedReason:
+              HARDCODED_PROTECTED_PACKAGES[item.packageName] || item.protectionReason || null,
+            isBlocked: blockedApps.includes(item.packageName),
+            isInstalledOnDevice: false,
+          });
+        }
       }
     }
 
-    return Array.from(map.values());
-  }, [inventory, blockedApps]);
-
-  // Filtered applications
-  const filteredApps = useMemo(() => {
-    return combinedAppList.filter((app) => {
-      // Search
-      const q = appSearch.trim().toLowerCase();
-      if (q) {
-        const matchesName = app.appName.toLowerCase().includes(q);
-        const matchesPkg = app.packageName.toLowerCase().includes(q);
-        if (!matchesName && !matchesPkg) return false;
-      }
-
-      // Filter
-      if (appFilter === 'blocked') return app.isBlocked;
-      if (appFilter === 'allowed') return !app.isBlocked && !app.isProtected;
-      if (appFilter === 'protected') return app.isProtected;
-      if (appFilter === 'pending') {
-        // Pending enforcement: blocked in desired policy but device reported revision is behind
-        const isDeviceBehind = (device.status?.applied_revision || 0) < (device.policy?.revision || 0);
-        return app.isBlocked && isDeviceBehind;
-      }
-      return true;
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.isBlocked !== b.isBlocked) return a.isBlocked ? -1 : 1;
+      if (a.isInstalledOnDevice !== b.isInstalledOnDevice) return a.isInstalledOnDevice ? -1 : 1;
+      if (a.isProtected !== b.isProtected) return a.isProtected ? 1 : -1;
+      return a.app_name.localeCompare(b.app_name, 'ar');
     });
-  }, [combinedAppList, appSearch, appFilter, device.status?.applied_revision, device.policy?.revision]);
+  }, [blockedApps, appInventory]);
 
-  // Single app toggle
-  const handleToggleApp = (pkg: string, targetBlocked: boolean) => {
-    if (HARDCODED_PROTECTED_PACKAGES[pkg]) {
-      setPolicyFeedback({
-        type: 'error',
-        message: `لا يمكن حظر التطبيق المحمي: ${pkg}`,
+  const filteredApps = useMemo(() => {
+    const q = appSearchQuery.trim().toLowerCase();
+    return unifiedDeviceApps.filter((app) => {
+      if (appFilter === 'blocked' && !app.isBlocked) return false;
+      if (appFilter === 'allowed' && (app.isBlocked || app.isProtected)) return false;
+      if (appFilter === 'protected' && !app.isProtected) return false;
+      if (!q) return true;
+      return (
+        app.app_name.toLowerCase().includes(q) ||
+        app.package_name.toLowerCase().includes(q) ||
+        app.categoryLabel.toLowerCase().includes(q)
+      );
+    });
+  }, [unifiedDeviceApps, appSearchQuery, appFilter]);
+
+  if (!device) return null;
+
+  const friendlyName = getDeviceFriendlyName(device);
+  const enforcementSummary = formatEnforcementSummaryAr(device);
+  const lastSeenInfo = formatLastSeenAr(device.lastSeenMs);
+
+  const resetAllLocalDrafts = () => {
+    setDeviceName(device.metadata?.device_name ?? '');
+    setRepName(device.metadata?.rep_name ?? '');
+    setMetaEdited(false);
+    setMetaError(null);
+    setBlockTethering(device.policy?.block_tethering ?? true);
+    setBlockedApps(device.policy?.blocked_apps ? [...device.policy.blocked_apps] : []);
+    setPolicyEdited(false);
+    setPinnedPolicyRevision(device.policy?.revision ?? null);
+    setPolicyRevisionConflict(null);
+    setPolicyError(null);
+    setKioskDirty(false);
+    setLocalDiscardSignal((s) => s + 1);
+  };
+
+  const guardNavigation = (action: () => void) => {
+    if (hasAnyUnsavedChanges) {
+      setPendingAction(() => () => {
+        resetAllLocalDrafts();
+        onDirtyChange?.(false);
+        action();
       });
-      return;
-    }
-
-    if (targetBlocked) {
-      if (blockedApps.includes(pkg)) return;
-      if (blockedApps.length >= MAX_BLOCKED_APPS) {
-        setPolicyFeedback({
-          type: 'error',
-          message: `تم الوصول إلى الحد الأقصى للتطبيقات المحظورة (${MAX_BLOCKED_APPS}).`,
-        });
-        return;
-      }
-      setBlockedApps([...blockedApps, pkg]);
     } else {
-      setBlockedApps(blockedApps.filter((p) => p !== pkg));
+      action();
     }
-    setIsDirty(true);
-    setPolicyFeedback(null);
   };
 
-  // Bulk allow/block selected apps within drawer
-  const handleBulkAllowSelected = () => {
-    if (selectedApps.size === 0) return;
-    setBlockedApps(blockedApps.filter((p) => !selectedApps.has(p)));
-    setSelectedApps(new Set());
-    setIsDirty(true);
-    setPolicyFeedback(null);
-  };
-
-  const handleBulkBlockSelected = () => {
-    if (selectedApps.size === 0) return;
-    const toAdd: string[] = [];
-    for (const pkg of selectedApps) {
-      if (HARDCODED_PROTECTED_PACKAGES[pkg]) continue;
-      if (!blockedApps.includes(pkg)) {
-        toAdd.push(pkg);
-      }
-    }
-    const union = Array.from(new Set([...blockedApps, ...toAdd]));
-    if (union.length > MAX_BLOCKED_APPS) {
-      setPolicyFeedback({
-        type: 'error',
-        message: `سيتجاوز إجمالي المحظورات الحد الأقصى (${MAX_BLOCKED_APPS}). اختر عدداً أقل.`,
-      });
+  const handleTabSwitch = (nextTab: DeviceManagementTabId) => {
+    if (nextTab === activeTab) return;
+    if (onTabChange) {
+      // Controlled by App.tsx guarded router (which guards URL hash, active tab, and form values)
+      onTabChange(nextTab);
       return;
     }
-    setBlockedApps(union);
-    setSelectedApps(new Set());
-    setIsDirty(true);
-    setPolicyFeedback(null);
+    guardNavigation(() => {
+      setInternalActiveTab(nextTab);
+    });
   };
 
-  // Add custom package input
-  const handleAddCustomPackage = (e: React.FormEvent) => {
+  const handleCopyUid = () => {
+    navigator.clipboard.writeText(device.uid);
+    setCopiedUid(true);
+    setTimeout(() => setCopiedUid(false), 2000);
+  };
+
+  const handleCopyDiagnostics = () => {
+    const diagPayload = {
+      uid: device.uid,
+      friendly_name: friendlyName,
+      enrollment: device.enrollment,
+      status: device.status,
+      policy: device.policy,
+      metadata: device.metadata,
+      computed: {
+        approvalState: device.approvalState,
+        enforcementState: device.enforcementState,
+        enforcementDetail: device.enforcementDetail,
+        isStaleConnection: device.isStaleConnection,
+      },
+    };
+    navigator.clipboard.writeText(JSON.stringify(diagPayload, null, 2));
+    setCopiedDiag(true);
+    setTimeout(() => setCopiedDiag(false), 2000);
+  };
+
+  const handleCopyPackage = (pkg: string) => {
+    navigator.clipboard.writeText(pkg);
+    setCopiedPkg(pkg);
+    setTimeout(() => setCopiedPkg(null), 1800);
+  };
+
+  const handleMetadataSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setCustomPackageError(null);
-    const trimmed = customPackageInput.trim();
-    if (!trimmed) return;
+    setMetaError(null);
+    setMetaSuccess(null);
 
-    if (HARDCODED_PROTECTED_PACKAGES[trimmed]) {
-      setCustomPackageError(`تطبيق محمي ولا يمكن حظره: ${trimmed}`);
+    if (!deviceName.trim()) {
+      setMetaError('يرجى إدخال اسم الجهاز الإداري.');
       return;
     }
 
-    const val = validatePackageName(trimmed, blockedApps);
-    if (!val.valid) {
-      setCustomPackageError(val.error || 'اسم حزمة غير صالح وفق شروط أندرويد.');
-      return;
-    }
-
-    setBlockedApps([...blockedApps, trimmed]);
-    setCustomPackageInput('');
-    setIsDirty(true);
-    setShowCatalogPicker(false);
-  };
-
-  // Add app from catalog picker
-  const handleSelectFromCatalog = (entry: typeof CURATED_APP_CATALOG[0]) => {
-    if (entry.isProtected || HARDCODED_PROTECTED_PACKAGES[entry.packageName]) {
-      setCustomPackageError(`تطبيق محمي برمجياً: ${entry.nameAr}`);
-      return;
-    }
-    if (blockedApps.includes(entry.packageName)) {
-      setCustomPackageError('التطبيق محظور بالفعل في القائمة.');
-      return;
-    }
-    if (blockedApps.length >= MAX_BLOCKED_APPS) {
-      setCustomPackageError(`تم الوصول للحد الأقصى (${MAX_BLOCKED_APPS}).`);
-      return;
-    }
-
-    setBlockedApps([...blockedApps, entry.packageName]);
-    setIsDirty(true);
-    setShowCatalogPicker(false);
-  };
-
-  // Save Policy to Firestore with conflict detection
-  const handleSavePolicySubmit = async () => {
-    setSavingPolicy(true);
-    setPolicyFeedback(null);
-    try {
-      const res = await onSavePolicy(device.uid, {
-        block_tethering: !allowTethering, // Invert: block_tethering = !allowTethering
-        blocked_apps: blockedApps,
-        expectedCurrentRevision: loadedRevision,
-        allowRepairCorrupted: repairMode,
-      });
-
-      setIsDirty(false);
-      setRepairMode(false);
-      setLoadedRevision(res.savedRevision);
-      setPolicyFeedback({
-        type: 'success',
-        message: `تم حفظ السياسة (الإصدار v${res.savedRevision}) بنجاح. حُفظ التغيير وبانتظار تأكيد الهاتف عند المزامنة.`,
-      });
-    } catch (err) {
-      setPolicyFeedback({
-        type: 'error',
-        message: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setSavingPolicy(false);
-    }
-  };
-
-  // Save Administrative Metadata
-  const handleSaveMetadataSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
     setSavingMeta(true);
-    setMetaFeedback(null);
     try {
-      await onSaveMetadata(device.uid, editName, editRep);
-      setMetaFeedback('تم حفظ الاسم الإداري واسم المندوب بنجاح.');
-    } catch (err) {
-      setMetaFeedback(err instanceof Error ? err.message : String(err));
+      await saveDeviceMetadata(db, device.uid, deviceName, repName, actor);
+      setMetaEdited(false);
+      setMetaSuccess('تم حفظ بيانات تعريف الجهاز بنجاح.');
+    } catch (err: any) {
+      setMetaError(err?.message || 'فشل حفظ البيانات التعريفية');
     } finally {
       setSavingMeta(false);
     }
   };
 
-  const lastSeenDetails = formatLastSeenAr(device.lastSeenMs);
-  const deviceLogs = auditLogs.filter((log) => log.target_uid === device.uid);
+  const handleApprovalToggle = async (nextApproved: boolean) => {
+    setApprovalError(null);
+    setSavingApproval(true);
+    try {
+      await setDeviceApproval(db, device.uid, nextApproved, actor);
+      setConfirmRevokeApproval(false);
+    } catch (err: any) {
+      setApprovalError(err?.message || 'فشل تحديث حالة الاعتماد');
+    } finally {
+      setSavingApproval(false);
+    }
+  };
+
+  const savePolicyChanges = async (
+    nextTethering: boolean,
+    nextBlocked: string[],
+    successText: string
+  ) => {
+    setPolicyError(null);
+    setPolicySuccess(null);
+    if (policyRevisionConflict) {
+      setPolicyError(
+        `تعارض تعديل: تم تحديث السياسة في الخادم إلى الإصدار v${policyRevisionConflict.incoming} بينما مسودتك مبنية على v${policyRevisionConflict.pinned}. راجع القيم المحدثة أولًا.`
+      );
+      return;
+    }
+    setSavingPolicy(true);
+    try {
+      const expectedRev = policyEdited
+        ? pinnedPolicyRevision
+        : device.policy
+        ? device.policy.revision
+        : null;
+      const { savedRevision } = await saveDevicePolicyTransaction(
+        db,
+        device.uid,
+        {
+          block_tethering: nextTethering,
+          blocked_apps: nextBlocked,
+          expectedCurrentRevision: expectedRev,
+          allowRepairCorrupted: Boolean(device.policy?.isCorrupted),
+        },
+        actor
+      );
+      setBlockedApps(nextBlocked);
+      setBlockTethering(nextTethering);
+      setPolicyEdited(false);
+      setPinnedPolicyRevision(savedRevision);
+      setPolicyRevisionConflict(null);
+      setPolicySuccess(successText);
+    } catch (err: any) {
+      setPolicyError(err?.message || 'فشل حفظ السياسة');
+    } finally {
+      setSavingPolicy(false);
+    }
+  };
+
+  const handleInstantSingleAppToggle = async (pkg: string, shouldBlock: boolean) => {
+    if (HARDCODED_PROTECTED_PACKAGES[pkg]) {
+      setPolicyError(`التطبيق (${pkg}) محمي: ${HARDCODED_PROTECTED_PACKAGES[pkg]}`);
+      return;
+    }
+
+    const nextBlocked = shouldBlock
+      ? Array.from(new Set([...blockedApps, pkg]))
+      : blockedApps.filter((item) => item !== pkg);
+
+    if (nextBlocked.length > MAX_BLOCKED_APPS) {
+      setPolicyError(`الحد الأقصى للتطبيقات المحظورة هو ${MAX_BLOCKED_APPS} تطبيق.`);
+      return;
+    }
+
+    const info = lookupAppInfo(pkg);
+    await savePolicyChanges(
+      blockTethering,
+      nextBlocked,
+      shouldBlock
+        ? `تم حفظ أمر حظر «${info.nameAr}» بالخادم، وبانتظار تأكيد الهاتف.`
+        : `تم حفظ أمر السماح لتطبيق «${info.nameAr}» بالخادم، وبانتظار تأكيد الهاتف.`
+    );
+  };
+
+  const handleBatchDeviceAppsAction = async (shouldBlock: boolean) => {
+    if (selectedPackages.size === 0) return;
+
+    const targets = Array.from(selectedPackages).filter(
+      (pkg) => !HARDCODED_PROTECTED_PACKAGES[pkg]
+    );
+
+    const nextBlocked = shouldBlock
+      ? Array.from(new Set([...blockedApps, ...targets]))
+      : blockedApps.filter((item) => !targets.includes(item));
+
+    if (nextBlocked.length > MAX_BLOCKED_APPS) {
+      setPolicyError(`الحد الأقصى للتطبيقات المحظورة هو ${MAX_BLOCKED_APPS} تطبيق.`);
+      return;
+    }
+
+    await savePolicyChanges(
+      blockTethering,
+      nextBlocked,
+      shouldBlock
+        ? `تم حفظ حظر (${targets.length}) تطبيق بالخادم، وبانتظار تأكيد الهاتف.`
+        : `تم حفظ السماح لـ (${targets.length}) تطبيق بالخادم، وبانتظار تأكيد الهاتف.`
+    );
+    setSelectedPackages(new Set());
+  };
+
+  const handleAddCustomPackage = async () => {
+    setPolicyError(null);
+    setPolicySuccess(null);
+    const trimmed = newPackageInput.trim();
+    if (!trimmed) return;
+
+    const check = validatePackageName(trimmed, blockedApps);
+    if (!check.valid) {
+      setPolicyError(check.error || 'اسم الحزمة غير صالح');
+      return;
+    }
+
+    const nextBlocked = [...blockedApps, trimmed];
+    setNewPackageInput('');
+    setShowAddCustomModal(false);
+
+    await savePolicyChanges(
+      blockTethering,
+      nextBlocked,
+      'تمت إضافة التطبيق إلى قائمة الحظر وحفظ السياسة بالخادم، وبانتظار تأكيد الهاتف.'
+    );
+  };
+
+  const handleSaveTethering = async () => {
+    await savePolicyChanges(
+      blockTethering,
+      blockedApps,
+      'تم حفظ إعدادات مشاركة الإنترنت بالخادم، وبانتظار تأكيد الهاتف.'
+    );
+  };
+
+  const toggleSelectPackage = (pkg: string) => {
+    const next = new Set(selectedPackages);
+    if (next.has(pkg)) next.delete(pkg);
+    else next.add(pkg);
+    setSelectedPackages(next);
+  };
+
+  const blockedCount = unifiedDeviceApps.filter((a) => a.isBlocked).length;
+  const protectedCount = unifiedDeviceApps.filter((a) => a.isProtected).length;
+  const allowedCount = unifiedDeviceApps.filter((a) => !a.isBlocked && !a.isProtected).length;
+  const hasRealInventory = Boolean(appInventory && Array.isArray(appInventory.apps));
+
+  const tabs: { id: DeviceManagementTabId; label: string; badge?: string | number; icon: React.ReactNode }[] = [
+    {
+      id: 'overview',
+      label: 'ملخص الجهاز',
+      icon: <Smartphone className="w-4 h-4" />,
+    },
+    {
+      id: 'apps',
+      label: 'التطبيقات',
+      badge: `${blockedApps.length} محظور`,
+      icon: <AppWindow className="w-4 h-4" />,
+    },
+    {
+      id: 'kiosk',
+      label: 'شاشة الشركة',
+      icon: <Shield className="w-4 h-4" />,
+    },
+    {
+      id: 'tethering',
+      label: 'مشاركة الإنترنت',
+      badge: blockTethering ? 'ممنوعة' : 'مسموحة',
+      icon: <WifiOff className="w-4 h-4" />,
+    },
+    {
+      id: 'history',
+      label: 'سجل الجهاز',
+      badge: deviceLogs.length,
+      icon: <History className="w-4 h-4" />,
+    },
+  ];
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/40 backdrop-blur-xs">
-      <div className="bg-white w-full max-w-3xl h-full shadow-2xl flex flex-col border-r border-slate-200 text-right overflow-hidden">
-        {/* Drawer Header */}
-        <div className="p-5 border-b border-slate-200 bg-slate-50 flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="p-2 bg-blue-100 text-blue-800 rounded-lg">
-                <Smartphone className="w-5 h-5" />
-              </span>
+    <div className="space-y-6" dir="rtl">
+      {/* Unsaved Changes Confirmation Modal */}
+      {pendingAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-100 text-amber-700 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
               <div>
-                <h2 className="text-lg font-bold text-slate-900">
-                  {device.metadata?.device_name || device.status?.model || 'جهاز بدون اسم'}
-                </h2>
-                <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5">
-                  <span>المندوب: {device.metadata?.rep_name || 'غير محدد'}</span>
-                  <span>·</span>
-                  <span>الطراز: {device.status?.model || 'غير محدد'}</span>
-                </div>
+                <h3 className="text-base font-bold text-slate-900">توجد تعديلات غير محفوظة</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  لديك تعديلات لم يتم حفظها في صفحة هذا الجهاز. هل تريد تجاهل التعديلات ومغادرة الصفحة؟
+                </p>
               </div>
             </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 rounded-lg transition-colors"
-              title="إغلاق"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-
-        {/* Unsaved Changes Banner */}
-        {isDirty && (
-          <div className="bg-amber-50 border-b border-amber-200 px-5 py-2.5 flex items-center justify-between gap-3 text-xs text-amber-900">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>توجد تعديلات غير محفوظة على سياسة هذا الجهاز.</span>
-            </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingAction(null)}
+                className="px-4 py-2 rounded-lg text-xs font-bold border border-slate-300 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                البقاء في الصفحة
+              </button>
               <button
                 type="button"
                 onClick={() => {
-                  setBlockedApps([...(device.policy?.blocked_apps || [])]);
-                  setAllowTethering(!(device.policy?.block_tethering ?? false));
-                  setIsDirty(false);
+                  const act = pendingAction;
+                  setPendingAction(null);
+                  onDirtyChange?.(false);
+                  act();
                 }}
-                className="px-2.5 py-1 text-slate-600 hover:bg-amber-100 rounded-md font-semibold"
+                className="px-4 py-2 rounded-lg text-xs font-bold bg-red-600 text-white hover:bg-red-700 cursor-pointer"
               >
-                تراجع
-              </button>
-              <button
-                type="button"
-                disabled={savingPolicy}
-                onClick={handleSavePolicySubmit}
-                className="inline-flex items-center gap-1 px-3 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-md font-bold shadow-xs"
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>حفظ التعديلات</span>
+                تجاهل التعديلات والمغادرة
               </button>
             </div>
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Drawer Tabs Navigation */}
-        <div className="flex items-center gap-1 px-5 border-b border-slate-200 bg-white overflow-x-auto text-xs font-semibold">
-          <button className="py-3 px-3 whitespace-nowrap text-blue-700" onClick={() => setActiveTab('kiosk')}>شاشة الشركة</button>
+      {/* Top Breadcrumb + Back Button Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-5 py-3.5 shadow-2xs">
+        <nav aria-label="مسار التنقل" className="flex items-center gap-2 text-sm">
           <button
             type="button"
-            onClick={() => setActiveTab('overview')}
-            className={`py-3 px-3 border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'overview'
-                ? 'border-blue-700 text-blue-700'
-                : 'border-transparent text-slate-600 hover:text-slate-900'
-            }`}
+            onClick={() => guardNavigation(onClose)}
+            className="font-bold text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1.5 cursor-pointer"
           >
-            <Smartphone className="w-4 h-4" />
-            <span>نظرة عامة</span>
+            <span>الأجهزة</span>
           </button>
+          <ChevronLeft className="w-4 h-4 text-slate-400 shrink-0" />
+          <span className="font-bold text-slate-900 truncate max-w-[260px] sm:max-w-md">
+            {friendlyName}
+          </span>
+        </nav>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('apps')}
-            className={`py-3 px-3 border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'apps'
-                ? 'border-blue-700 text-blue-700'
-                : 'border-transparent text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Layers className="w-4 h-4" />
-            <span>التطبيقات ({blockedApps.length} ممنوع)</span>
-          </button>
+        <button
+          type="button"
+          onClick={() => guardNavigation(onClose)}
+          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-bold bg-slate-100 text-slate-800 hover:bg-slate-200 transition-colors self-start sm:self-auto cursor-pointer"
+        >
+          <ArrowRight className="w-4 h-4" />
+          <span>العودة إلى قائمة الأجهزة</span>
+        </button>
+      </div>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('tethering')}
-            className={`py-3 px-3 border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'tethering'
-                ? 'border-blue-700 text-blue-700'
-                : 'border-transparent text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            {allowTethering ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
-            <span>مشاركة الإنترنت ({allowTethering ? 'مسموح' : 'ممنوع'})</span>
-          </button>
+      {/* Full-Page Device Header Card */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="p-3.5 rounded-2xl bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
+              <Smartphone className="w-7 h-7" />
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h2 className="text-xl font-bold text-slate-900">{friendlyName}</h2>
+                {device.isArchived && (
+                  <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                    مؤرشف
+                  </span>
+                )}
+                <ApprovalBadge state={device.approvalState} />
+                <EnforcementBadge state={device.enforcementState} />
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                <span>
+                  <strong className="text-slate-800">المندوب:</strong>{' '}
+                  {device.metadata?.rep_name || 'غير محدد'}
+                </span>
+                <span>•</span>
+                <span>
+                  <strong className="text-slate-800">الطراز:</strong>{' '}
+                  {device.status?.model || 'في انتظار بيانات الهاتف'}
+                </span>
+                <span>•</span>
+                <span>
+                  <strong className="text-slate-800">آخر تواصل:</strong>{' '}
+                  {lastSeenInfo.relative} ({lastSeenInfo.formatted})
+                </span>
+              </div>
+            </div>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('audit')}
-            className={`py-3 px-3 border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'audit'
-                ? 'border-blue-700 text-blue-700'
-                : 'border-transparent text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <History className="w-4 h-4" />
-            <span>سجل العمليات ({deviceLogs.length})</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('technical')}
-            className={`py-3 px-3 border-b-2 transition-colors whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'technical'
-                ? 'border-blue-700 text-blue-700'
-                : 'border-transparent text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Terminal className="w-4 h-4" />
-            <span>تفاصيل تقنية</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 self-start lg:self-center">
+            <StaleConnectionBadge isStale={device.isStaleConnection} />
+            <DeviceOwnerBadge isOwner={device.status?.device_owner} />
+          </div>
         </div>
 
-        {/* Feedback alert inside drawer */}
-        {policyFeedback && (
-          <div
-            className={`mx-5 mt-4 p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
-              policyFeedback.type === 'success'
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                : 'bg-red-50 border-red-200 text-red-900'
-            }`}
-          >
-            {policyFeedback.type === 'success' ? (
-              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
-            ) : (
-              <ShieldAlert className="w-4 h-4 text-red-700 shrink-0 mt-0.5" />
-            )}
-            <div className="leading-relaxed">{policyFeedback.message}</div>
-          </div>
-        )}
-
-        {/* Tab Content Body */}
-        <div className="flex-1 overflow-y-auto p-5 space-y-6">
-          {/* ===================== TAB 1: OVERVIEW ===================== */}
-          {activeTab === 'overview' && (
-            <div className="space-y-6 text-xs">
-              {/* Device Status Badges Row */}
-              <div className="flex flex-wrap items-center gap-2 p-4 bg-slate-50 border border-slate-200 rounded-xl">
-                <ApprovalBadge state={device.approvalState} />
-                <DeviceOwnerBadge isOwner={device.status?.device_owner} />
-                <EnforcementBadge state={device.enforcementState} />
-                <StaleConnectionBadge isStale={device.isStaleConnection} />
-              </div>
-
-              {/* Status explanation */}
-              <div className="p-4 bg-white border border-slate-200 rounded-xl space-y-2">
-                <span className="font-bold text-slate-900 block text-sm">حالة المزامنة والاتصال</span>
-                <p className="text-slate-700 leading-relaxed">{device.enforcementDetail}</p>
-                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-slate-500 text-[11px]">
-                  <span>آخر تواصل مسجل: {lastSeenDetails.relative} ({lastSeenDetails.formatted})</span>
-                  <span className="text-[10px]">{lastSeenDetails.explanation}</span>
-                </div>
-              </div>
-
-              {/* Hardware & Agent Info Cards */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                  <span className="text-slate-500 text-[11px] block">البطارية</span>
-                  <span className="text-base font-bold font-mono text-slate-900 mt-1 block">
-                    {device.status ? `${device.status.battery_percent}%` : 'غير متوفر'}
-                  </span>
-                </div>
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                  <span className="text-slate-500 text-[11px] block">نظام أندرويد</span>
-                  <span className="text-base font-bold font-mono text-slate-900 mt-1 block">
-                    {formatAndroidSdk(device.status?.android_sdk)}
-                  </span>
-                </div>
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                  <span className="text-slate-500 text-[11px] block">إصدار الوكيل</span>
-                  <span className="text-base font-bold font-mono text-slate-900 mt-1 block">
-                    {device.status?.agent_version || 'غير معروف'}
-                  </span>
-                </div>
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                  <span className="text-slate-500 text-[11px] block">الإصدار المطبق</span>
-                  <span className="text-base font-bold font-mono text-slate-900 mt-1 block">
-                    v{device.status?.applied_revision ?? 0}
-                  </span>
-                </div>
-              </div>
-
-              {/* Administrative Names Form */}
-              <form
-                onSubmit={handleSaveMetadataSubmit}
-                className="p-4 bg-white border border-slate-200 rounded-xl space-y-4"
-              >
-                <div>
-                  <h4 className="text-sm font-bold text-slate-900">التعريف الإداري للجهاز</h4>
-                  <p className="text-slate-500 text-[11px] mt-0.5">
-                    يُحفظ في مجموعة <code className="font-mono">deviceMetadata</code> المنفصلة دون المساس بإعدادات الوكيل على الهاتف.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      اسم الجهاز الإداري
-                    </label>
-                    <input
-                      type="text"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      placeholder="مثال: جهاز خط مبيعات شمال الرياض"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-700 mb-1">
-                      اسم المندوب المسؤول
-                    </label>
-                    <input
-                      type="text"
-                      value={editRep}
-                      onChange={(e) => setEditRep(e.target.value)}
-                      placeholder="مثال: أحمد العتيبي"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                    />
-                  </div>
-                </div>
-
-                {metaFeedback && (
-                  <p className="text-[11px] text-emerald-700 font-semibold">{metaFeedback}</p>
-                )}
-
-                <div className="flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={savingMeta}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-colors"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    <span>حفظ بيانات الجهاز</span>
-                  </button>
-                </div>
-              </form>
-
-              {/* Approval status toggle */}
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-slate-900 block">اعتماد الجهاز في النظام</span>
-                  <span className="text-[11px] text-slate-500 mt-0.5 block">
-                    {device.approvalState === 'approved'
-                      ? 'الجهاز معتمد ومسموح له بمزامنة السياسات.'
-                      : 'الجهاز غير معتمد ولا يمكنه قراءة السياسات.'}
-                  </span>
-                </div>
+        {/* Organized 5-Tab Bar (Wraps cleanly, no horizontal clipping) */}
+        <div className="pt-3 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="أقسام إدارة الجهاز">
+            {tabs.map((tab) => {
+              const isActive = activeTab === tab.id;
+              return (
                 <button
+                  key={tab.id}
                   type="button"
-                  onClick={() => onToggleApproval(device.uid, device.approvalState !== 'approved')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                    device.approvalState === 'approved'
-                      ? 'bg-amber-100 hover:bg-amber-200 text-amber-900'
-                      : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => handleTabSwitch(tab.id)}
+                  className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold transition-all cursor-pointer ${
+                    isActive
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-slate-100/80 text-slate-700 hover:bg-slate-200/70 hover:text-slate-900'
                   }`}
                 >
-                  {device.approvalState === 'approved' ? 'إلغاء الاعتماد' : 'اعتماد الجهاز'}
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                  {tab.badge !== undefined && (
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-xs font-bold ${
+                        isActive
+                          ? 'bg-white/20 text-white'
+                          : 'bg-white text-slate-600 border border-slate-200'
+                      }`}
+                    >
+                      {tab.badge}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* TAB 1: OVERVIEW (ملخص الجهاز) */}
+      {activeTab === 'overview' && (
+        <div className="space-y-6">
+          {/* Top Grid: Sync Status + KPI Metrics */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-7 bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-3">
+              <h3 className="text-base font-bold text-slate-900">حالة التنفيذ والتواصل</h3>
+              <p className="text-sm text-slate-700 leading-relaxed">{enforcementSummary.summary}</p>
+
+              {device.status?.error && (
+                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-900 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-red-800">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                    <span>أبلغ الهاتف عن مشكلة أثناء تطبيق السياسة</span>
+                  </div>
+                  <p className="text-red-700 leading-relaxed">
+                    تأكد من تفعيل صلاحية إدارة الجهاز على الهاتف واتصاله بالإنترنت.
+                  </p>
+                  <details className="pt-1">
+                    <summary className="cursor-pointer font-semibold text-red-800 hover:underline">
+                      عرض رسالة الخطأ التقنية الواردة من الهاتف
+                    </summary>
+                    <pre className="mt-1.5 p-2 rounded bg-white/90 border border-red-200 font-mono text-[11px] text-red-900 overflow-x-auto" dir="ltr">
+                      {device.status.error}
+                    </pre>
+                  </details>
+                </div>
+              )}
+
+              <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                <span>آخر تواصل مسجل: {lastSeenInfo.relative}</span>
+                <span>الوقت الدقيق: {lastSeenInfo.formatted}</span>
+              </div>
+            </div>
+
+            <div className="lg:col-span-5 grid grid-cols-2 gap-3">
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">البطارية</span>
+                <span className="text-xl font-bold text-slate-900 mt-1">
+                  {device.status?.battery_percent !== undefined && device.status?.battery_percent >= 0
+                    ? `${device.status.battery_percent}%`
+                    : 'غير متوفر'}
+                </span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">نظام أندرويد</span>
+                <span className="text-base font-bold text-slate-900 mt-1" dir="ltr">
+                  {device.status?.android_sdk
+                    ? formatAndroidSdk(device.status.android_sdk)
+                    : 'غير متوفر'}
+                </span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">إصدار تطبيق الحماية</span>
+                <span className="text-base font-bold text-slate-900 font-mono mt-1" dir="ltr">
+                  {device.status?.agent_version || '—'}
+                </span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">رقم الإصدار المطبق</span>
+                <span className="text-base font-bold text-slate-900 mt-1">
+                  {device.status?.applied_revision !== undefined && device.status.applied_revision > 0
+                    ? `الإصدار ${device.status.applied_revision}`
+                    : 'لم يطبق بعد'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Two-Column Form Row: Administrative Identity + Device Approval */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            {/* Administrative Metadata Form */}
+            <form
+              onSubmit={handleMetadataSubmit}
+              className="lg:col-span-8 bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">التعريف الإداري للجهاز</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    حدد اسماً واضحاً للجهاز واسم المندوب المسؤول عنه لسهولة المتابعة في اللوحة وسجل العمليات.
+                  </p>
+                </div>
+                {isMetaDirty && (
+                  <span className="px-2.5 py-1 rounded-md bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold">
+                    تعديلات غير محفوظة
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    اسم الجهاز الإداري
+                  </label>
+                  <input
+                    type="text"
+                    value={deviceName}
+                    onChange={(e) => {
+                      setMetaEdited(true);
+                      setDeviceName(e.target.value);
+                    }}
+                    placeholder="مثال: هاتف مندوب الرياض 1"
+                    className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    اسم المندوب المسؤول
+                  </label>
+                  <input
+                    type="text"
+                    value={repName}
+                    onChange={(e) => {
+                      setMetaEdited(true);
+                      setRepName(e.target.value);
+                    }}
+                    placeholder="مثال: أحمد العتيبي"
+                    className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-slate-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+                  />
+                </div>
+              </div>
+
+              {metaError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{metaError}</span>
+                </div>
+              )}
+
+              {metaSuccess && (
+                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{metaSuccess}</span>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <button
+                  type="submit"
+                  disabled={savingMeta}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 transition-colors cursor-pointer"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>{savingMeta ? 'جارٍ الحفظ...' : 'حفظ بيانات الجهاز'}</span>
+                </button>
+              </div>
+            </form>
+
+            {/* Approval Control Card */}
+            <div className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">اعتماد الجهاز في النظام</h3>
+                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                  {device.approvalState === 'approved'
+                    ? 'الجهاز معتمد حالياً ومسموح له باستلام السياسات وإرسال تقارير الحالة.'
+                    : 'الجهاز غير معتمد حالياً؛ لن يتمكن الهاتف من قراءة السياسات حتى يتم اعتماده.'}
+                </p>
+              </div>
+
+              {approvalError && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                  {approvalError}
+                </div>
+              )}
+
+              {device.approvalState === 'approved' ? (
+                !confirmRevokeApproval ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRevokeApproval(true)}
+                    className="w-full px-4 py-2.5 rounded-xl text-xs font-bold bg-amber-50 text-amber-900 border border-amber-300 hover:bg-amber-100 transition-colors cursor-pointer"
+                  >
+                    سحب اعتماد الجهاز...
+                  </button>
+                ) : (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 space-y-3">
+                    <p className="text-xs text-amber-950 font-semibold leading-relaxed">
+                      هل أنت متأكد من سحب اعتماد هذا الجهاز؟ سيتوقف الهاتف عن مزامنة السياسات الجديدة، مع بقاء القيود المطبقة حالياً على الهاتف.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={savingApproval}
+                        onClick={() => handleApprovalToggle(false)}
+                        className="flex-1 px-3 py-2 rounded-lg text-xs font-bold bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 cursor-pointer"
+                      >
+                        {savingApproval ? 'جارٍ التنفيذ...' : 'تأكيد سحب الاعتماد'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRevokeApproval(false)}
+                        className="px-3 py-2 rounded-lg text-xs font-bold bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </div>
+                )
+              ) : (
+                <button
+                  type="button"
+                  disabled={savingApproval}
+                  onClick={() => handleApprovalToggle(true)}
+                  className="w-full px-4 py-3 rounded-xl text-sm font-bold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+                >
+                  {savingApproval ? 'جارٍ الاعتماد...' : 'اعتماد الجهاز الآن'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Device Visibility & Archiving Card */}
+          <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-bold text-slate-900">إدارة ظهور الجهاز في القائمة</h3>
+                {device.isArchived && (
+                  <span className="px-2 py-0.5 rounded-md text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300">
+                    مؤرشف حالياً
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
+                {device.isArchived
+                  ? 'هذا الجهاز مؤرشف حالياً ومخفي من القائمة الرئيسية والعدادات. إدارته وقيوده ومزامنته مستمرة على الهاتف كما هي.'
+                  : 'يمكنك إزالة الجهاز من القائمة الرئيسية لإخفائه عن العرض اليومي، مع بقاء إدارته وقيوده على الهاتف كما هي.'}
+              </p>
+              {archiveError && (
+                <div className="text-xs text-red-600 font-semibold pt-1">{archiveError}</div>
+              )}
+              {archiveSuccess && (
+                <div className="text-xs text-emerald-700 font-semibold pt-1">{archiveSuccess}</div>
+              )}
+            </div>
+
+            <div className="shrink-0">
+              {device.isArchived ? (
+                <button
+                  type="button"
+                  disabled={savingArchive}
+                  onClick={() => handleArchiveToggle(false)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+                >
+                  <ArchiveRestore className="w-4 h-4" />
+                  <span>{savingArchive ? 'جارٍ الاستعادة...' : 'استعادة الجهاز'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowArchiveConfirmModal(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 border border-slate-300 hover:bg-slate-200 transition-colors cursor-pointer"
+                >
+                  <Archive className="w-4 h-4" />
+                  <span>إزالة الجهاز من القائمة</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Collapsed Technical Details Section (تفاصيل تقنية) */}
+          <details className="bg-white border border-slate-200 rounded-xl shadow-2xs group">
+            <summary className="px-5 py-4 flex items-center justify-between cursor-pointer list-none select-none">
+              <div className="flex items-center gap-2.5">
+                <Code2 className="w-4.5 h-4.5 text-slate-500" />
+                <span className="text-sm font-bold text-slate-800">تفاصيل تقنية ومعلومات التشخيص</span>
+                <span className="text-xs text-slate-500">(معرف الجهاز، نسخ السياسات، والبيانات الخام)</span>
+              </div>
+              <span className="text-xs font-bold text-blue-600 group-open:rotate-180 transition-transform">
+                ▼
+              </span>
+            </summary>
+
+            <div className="px-5 pb-5 pt-2 border-t border-slate-100 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-bold text-slate-600">المعرف التقني للجهاز (Device UID)</div>
+                  <div className="font-mono text-xs text-slate-900 select-all" dir="ltr">
+                    {device.uid}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyUid}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 cursor-pointer"
+                  >
+                    {copiedUid ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedUid ? 'تم نسخ المعرف' : 'نسخ المعرف'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCopyDiagnostics}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 cursor-pointer"
+                  >
+                    {copiedDiag ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedDiag ? 'تم نسخ التشخيص' : 'نسخ معلومات التشخيص'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                  <div className="font-bold text-slate-800 border-b border-slate-200 pb-1.5">
+                    معلومات الجهاز والنظام
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">الطراز:</span>
+                    <span className="font-mono text-slate-900" dir="ltr">
+                      {device.status?.model ?? '—'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">مستوى Android SDK:</span>
+                    <span className="font-mono text-slate-900" dir="ltr">
+                      {device.status?.android_sdk ?? '—'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">إصدار الوكيل:</span>
+                    <span className="font-mono text-slate-900" dir="ltr">
+                      {device.status?.agent_version ?? '—'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+                  <div className="font-bold text-slate-800 border-b border-slate-200 pb-1.5">
+                    معلومات المزامنة والسياسة
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">إصدار السياسة بالخادم:</span>
+                    <span className="font-mono text-slate-900">{device.policy?.revision ?? '—'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">الإصدار المطبق بالهاتف:</span>
+                    <span className="font-mono text-slate-900">{device.status?.applied_revision ?? '—'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">التشخيص الكامل:</span>
+                    <span className="text-slate-900 truncate max-w-[200px]" title={device.enforcementDetail}>
+                      {device.enforcementDetail}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      )}
+
+      {/* TAB 2: APPS (التطبيقات) */}
+      {activeTab === 'apps' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
+          {/* Header & Inventory Status Bar */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+            <div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <h3 className="text-base font-bold text-slate-900">إدارة تطبيقات الجهاز</h3>
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold border ${
+                    hasRealInventory
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  {inventoryLoading
+                    ? 'جارٍ قراءة جرد الهاتف...'
+                    : hasRealInventory
+                    ? `جرد فعلي من الهاتف (${appInventory?.apps.length ?? 0} تطبيق)`
+                    : 'لم يصل جرد فعلي من الهاتف بعد'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                {hasRealInventory
+                  ? `آخر تحديث لجرد التطبيقات من الهاتف: ${
+                      formatTimestampAr(appInventory?.reported_at?.toMillis?.() ?? null).formatted
+                    }. يمكنك حظر أو السماح بالتطبيقات مباشرة.`
+                  : 'يعرض هذا القسم التطبيقات المحظورة في السياسة الحالية بالإضافة إلى دليل التطبيقات الشائعة كمرجع لحين وصول جرد الهاتف الفعلي.'}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 self-start lg:self-center">
+              <button
+                type="button"
+                onClick={() => setShowPackageNames(!showPackageNames)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>{showPackageNames ? 'إخفاء معرف الحزمة' : 'إظهار معرف الحزمة'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAddCustomModal(!showAddCustomModal)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة تطبيق للحظر بمعرف الحزمة</span>
+              </button>
+            </div>
+          </div>
+
+          {inventoryError && (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+              <div>
+                <span className="font-bold">تنبيه قراءة جرد التطبيقات:</span> تعذر قراءة الجرد الفعلي من الخادم ({inventoryError}).
+              </div>
+            </div>
+          )}
+
+          {/* Custom Package Inline Form */}
+          {showAddCustomModal && (
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-slate-900">
+                  حظر تطبيق إضافي عبر معرف الحزمة (Package Name)
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => setShowAddCustomModal(false)}
+                  className="text-xs text-slate-500 hover:text-slate-700 font-bold cursor-pointer"
+                >
+                  إغلاق
+                </button>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={newPackageInput}
+                  onChange={(e) => setNewPackageInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void handleAddCustomPackage();
+                    }
+                  }}
+                  placeholder="com.example.app"
+                  className="flex-1 px-3.5 py-2 text-sm font-mono rounded-lg border border-slate-300 bg-white focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+                />
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={() => void handleAddCustomPackage()}
+                  className="px-4 py-2 rounded-lg text-xs font-bold bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 cursor-pointer"
+                >
+                  حظر وحفظ بالسياسة
                 </button>
               </div>
             </div>
           )}
 
-          {/* ===================== TAB 2: APPS ===================== */}
-          {activeTab === 'kiosk' && <KioskPanel db={db} device={device} actor={actor} inventory={inventory} />}
-
-          {activeTab === 'apps' && (
-            <div className="space-y-4 text-xs">
-              {/* App Inventory Honest Notice */}
-              {!inventory && !inventoryLoading && (
-                <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl flex items-start gap-3 text-amber-950">
-                  <Info className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-                  <div className="space-y-1 leading-relaxed">
-                    <p className="font-bold">عرض تطبيقات هذا الجهاز يتطلب تحديث تطبيق إنجاز (0.3.1+)</p>
-                    <p>
-                      الوكيل الحالي لا يرفع بعد وثيقة جرد التطبيقات (<code className="font-mono">deviceAppInventory</code>).
-                      يمكنك حالياً اختيار التطبيقات من الدليل المعتمد بالأسماء، أو إدخال الحزمة بالخيارات المتقدمة، وستُطبق السياسة فوراً على الوكيل.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Search & Actions Bar */}
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
-                  <input
-                    type="text"
-                    value={appSearch}
-                    onChange={(e) => setAppSearch(e.target.value)}
-                    placeholder="ابحث باسم التطبيق أو الحزمة…"
-                    className="w-full pr-9 pl-3 py-2 bg-slate-50 border border-slate-300 rounded-lg text-xs focus:bg-white focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowCatalogPicker(!showCatalogPicker)}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition-colors whitespace-nowrap"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>إضافة تطبيق للحظر</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Catalog Picker Drawer / Section */}
-              {showCatalogPicker && (
-                <div className="p-4 bg-blue-50/50 border border-blue-200 rounded-xl space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900 text-xs">اختر تطبيقاً شائعاً لحظر استخدامه:</span>
-                    <button
-                      type="button"
-                      onClick={() => setShowCatalogPicker(false)}
-                      className="text-slate-400 hover:text-slate-600"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <input
-                    type="text"
-                    value={catalogSearch}
-                    onChange={(e) => setCatalogSearch(e.target.value)}
-                    placeholder="ابحث في دليل التطبيقات (تيك توك، ببجي، نتفلكس...)"
-                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:outline-hidden focus:ring-1 focus:ring-blue-600"
-                  />
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-48 overflow-y-auto">
-                    {searchCuratedCatalog(catalogSearch)
-                      .filter((c) => !c.isProtected && !blockedApps.includes(c.packageName))
-                      .map((entry) => (
-                        <button
-                          key={entry.packageName}
-                          type="button"
-                          onClick={() => handleSelectFromCatalog(entry)}
-                          className="text-right p-2 bg-white hover:bg-blue-50 border border-slate-200 hover:border-blue-300 rounded-lg transition-colors flex items-center justify-between gap-2"
-                        >
-                          <div>
-                            <span className="font-bold text-slate-900 block truncate">{entry.nameAr}</span>
-                            <span className="font-mono text-[9px] text-slate-400 block truncate">
-                              {entry.packageName}
-                            </span>
-                          </div>
-                          <span className="p-1 text-blue-700">
-                            <Plus className="w-3.5 h-3.5" />
-                          </span>
-                        </button>
-                      ))}
-                  </div>
-
-                  {/* Manual package entry fallback in an advanced toggle */}
-                  <details className="pt-2 border-t border-blue-200">
-                    <summary className="cursor-pointer text-[11px] font-semibold text-blue-800 hover:underline">
-                      إدخال اسم حزمة يدويًا (خيارات متقدمة)
-                    </summary>
-                    <form onSubmit={handleAddCustomPackage} className="mt-2 flex gap-2">
-                      <input
-                        type="text"
-                        value={customPackageInput}
-                        onChange={(e) => setCustomPackageInput(e.target.value)}
-                        placeholder="com.example.app"
-                        className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
-                      />
-                      <button
-                        type="submit"
-                        className="px-3 py-1.5 bg-slate-900 text-white font-semibold rounded-lg text-xs"
-                      >
-                        إضافة
-                      </button>
-                    </form>
-                    {customPackageError && (
-                      <p className="text-[11px] text-red-600 mt-1">{customPackageError}</p>
-                    )}
-                  </details>
-                </div>
-              )}
-
-              {/* Filter Chips & Multi-selection Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                <div className="flex items-center gap-1.5 overflow-x-auto text-[11px]">
-                  <button
-                    type="button"
-                    onClick={() => setAppFilter('all')}
-                    className={`px-2.5 py-1 rounded-md font-semibold ${
-                      appFilter === 'all'
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    الكل ({combinedAppList.length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAppFilter('blocked')}
-                    className={`px-2.5 py-1 rounded-md font-semibold ${
-                      appFilter === 'blocked'
-                        ? 'bg-red-700 text-white'
-                        : 'bg-red-50 text-red-800 hover:bg-red-100'
-                    }`}
-                  >
-                    ممنوع ({combinedAppList.filter((a) => a.isBlocked).length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAppFilter('allowed')}
-                    className={`px-2.5 py-1 rounded-md font-semibold ${
-                      appFilter === 'allowed'
-                        ? 'bg-emerald-700 text-white'
-                        : 'bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
-                    }`}
-                  >
-                    مسموح ({combinedAppList.filter((a) => !a.isBlocked && !a.isProtected).length})
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAppFilter('protected')}
-                    className={`px-2.5 py-1 rounded-md font-semibold ${
-                      appFilter === 'protected'
-                        ? 'bg-blue-700 text-white'
-                        : 'bg-blue-50 text-blue-800 hover:bg-blue-100'
-                    }`}
-                  >
-                    محمي ({combinedAppList.filter((a) => a.isProtected).length})
-                  </button>
-                </div>
-
-                {selectedApps.size > 0 && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold text-slate-700">
-                      محدد: {selectedApps.size}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={handleBulkBlockSelected}
-                      className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-[11px] font-bold"
-                    >
-                      منع المحدد
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleBulkAllowSelected}
-                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-[11px] font-bold"
-                    >
-                      السماح بالمحدد
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Apps List Table */}
-              <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
-                {filteredApps.length === 0 ? (
-                  <div className="p-8 text-center text-slate-500">
-                    لا توجد تطبيقات مطابقة لمعايير البحث.
-                  </div>
-                ) : (
-                  filteredApps.map((app) => {
-                    const isSelected = selectedApps.has(app.packageName);
-                    return (
-                      <div
-                        key={app.packageName}
-                        className={`p-3.5 flex items-center justify-between gap-3 transition-colors ${
-                          app.isBlocked
-                            ? 'bg-red-50/40'
-                            : app.isProtected
-                            ? 'bg-blue-50/30'
-                            : 'bg-white hover:bg-slate-50/80'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3">
-                          {!app.isProtected && (
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={(e) => {
-                                const next = new Set(selectedApps);
-                                if (e.target.checked) next.add(app.packageName);
-                                else next.delete(app.packageName);
-                                setSelectedApps(next);
-                              }}
-                              className="rounded border-slate-300 text-blue-700 focus:ring-blue-600"
-                            />
-                          )}
-
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs ${app.badgeBg} ${app.badgeTextColor}`}>
-                            {app.appName.slice(0, 1)}
-                          </div>
-
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-slate-900 text-xs">{app.appName}</span>
-                              {app.isProtected && (
-                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-100 text-blue-800">
-                                  <Shield className="w-3 h-3" />
-                                  <span>محمي</span>
-                                </span>
-                              )}
-                              {app.isBlocked && (
-                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-800">
-                                  <Ban className="w-3 h-3" />
-                                  <span>ممنوع</span>
-                                </span>
-                              )}
-                              {!app.isBlocked && !app.isProtected && (
-                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
-                                  <Check className="w-3 h-3" />
-                                  <span>مسموح</span>
-                                </span>
-                              )}
-                            </div>
-
-                            <span className="font-mono text-[10px] text-slate-400 block mt-0.5">
-                              {app.packageName}
-                            </span>
-
-                            {app.protectionReason && (
-                              <p className="text-[10px] text-blue-700 mt-0.5">
-                                {app.protectionReason}
-                              </p>
-                            )}
-
-                            {!app.reportedInInventory && app.isBlocked && (
-                              <p className="text-[10px] text-amber-700 mt-0.5">
-                                لم يؤكد الجرد وجوده بعد على الهاتف؛ الحظر مسجل بالسياسة ويمكن فكه.
-                              </p>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Toggle Action Button */}
-                        <div className="shrink-0">
-                          {app.isProtected ? (
-                            <span className="text-[11px] text-slate-400 font-medium">نظام محمي</span>
-                          ) : app.isBlocked ? (
-                            <button
-                              type="button"
-                              onClick={() => handleToggleApp(app.packageName, false)}
-                              className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-800 font-bold rounded-lg text-xs transition-colors"
-                            >
-                              السماح بالتطبيق
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleToggleApp(app.packageName, true)}
-                              className="px-3 py-1.5 bg-red-50 hover:bg-red-100 border border-red-300 text-red-800 font-bold rounded-lg text-xs transition-colors"
-                            >
-                              حظر التطبيق
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
+          {/* Feedback Banners */}
+          {policyError && (
+            <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{policyError}</span>
             </div>
           )}
 
-          {/* ===================== TAB 3: TETHERING ===================== */}
-          {activeTab === 'tethering' && (
-            <div className="space-y-6 text-xs">
-              <div className="p-5 bg-white border border-slate-200 rounded-xl space-y-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <h3 className="text-base font-bold text-slate-900">
-                      إعداد مشاركة الإنترنت ونقطة الاتصال (Hotspot)
-                    </h3>
-                    <p className="text-slate-500 text-xs mt-1 leading-relaxed">
-                      يتحكم في إمكانية استخدام هاتف المندوب كنقطة اتصال لمشاركة باقة الإنترنت مع أجهزة أخرى عبر شبكة Wi-Fi أو البلوتوث أو USB.
-                    </p>
-                  </div>
-                  <div className={`p-3 rounded-2xl ${allowTethering ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
-                    {allowTethering ? <Wifi className="w-6 h-6" /> : <WifiOff className="w-6 h-6" />}
-                  </div>
-                </div>
-
-                {/* Clear Toggle Switch for Non-Technical Managers */}
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
-                  <div>
-                    <span className="font-bold text-sm text-slate-900 block">
-                      السماح بمشاركة الإنترنت
-                    </span>
-                    <span className="text-[11px] text-slate-500 mt-0.5 block">
-                      {allowTethering
-                        ? 'مسموح: يمكن للمندوب تفعيل نقطة الاتصال (Hotspot).'
-                        : 'ممنوع: تطبيق وكيل إنجاز يفرض قيد DISALLOW_CONFIG_TETHERING ويمنع تشغيل الهوتسبوت.'}
-                    </span>
-                  </div>
-
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={allowTethering}
-                      onChange={(e) => {
-                        setAllowTethering(e.target.checked);
-                        setIsDirty(true);
-                      }}
-                      className="sr-only peer"
-                    />
-                    <div className="w-11 h-6 bg-slate-300 peer-focus:outline-hidden rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:right-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
-                  </label>
-                </div>
-
-                {/* Comparison Card: Desired vs Phone Reported */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                    <span className="text-slate-500 text-[11px] block">المطلوب من الإدارة (في السياسة)</span>
-                    <span className="text-sm font-bold text-slate-900 mt-1 block">
-                      {allowTethering ? 'مسموح بمشاركة الإنترنت' : 'حظر مشاركة الإنترنت (Hotspot)'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
-                      block_tethering = {!allowTethering ? 'true' : 'false'}
-                    </span>
-                  </div>
-
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
-                    <span className="text-slate-500 text-[11px] block">الحالة المبلغ عنها من الهاتف</span>
-                    <span className="text-sm font-bold text-slate-900 mt-1 block">
-                      {device.status === null
-                        ? 'لم يرد تقرير حالة بعد'
-                        : device.status.tethering_restricted
-                        ? 'ممنوعة ومقفلة فعلياً على الجهاز'
-                        : 'غير ممنوعة (مفتوحة)'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
-                      tethering_restricted = {device.status?.tethering_restricted ? 'true' : 'false'}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Save button if changed */}
-                <div className="flex justify-end pt-2">
-                  <button
-                    type="button"
-                    disabled={savingPolicy || !isDirty}
-                    onClick={handleSavePolicySubmit}
-                    className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-blue-700 hover:bg-blue-800 disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl text-xs font-bold transition-colors shadow-xs"
-                  >
-                    <Save className="w-4 h-4" />
-                    <span>حفظ إعداد المشاركة</span>
-                  </button>
-                </div>
-              </div>
+          {policySuccess && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+              <span>{policySuccess}</span>
             </div>
           )}
 
-          {/* ===================== TAB 4: AUDIT LOGS ===================== */}
-          {activeTab === 'audit' && (
-            <div className="space-y-4 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-slate-900 text-sm">
-                  سجل التعديلات والإجراءات الإدارية الخاصة بهذا الجهاز
-                </span>
-                <span className="text-slate-500 text-[11px]">
-                  سجل تدقيق محمي من الحذف والتعديل
-                </span>
-              </div>
-
-              {deviceLogs.length === 0 ? (
-                <div className="p-8 text-center text-slate-500 bg-slate-50 border border-slate-200 rounded-xl">
-                  لا توجد عمليات مسجلة لهذا الجهاز حتى الآن.
-                </div>
-              ) : (
-                <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
-                  {deviceLogs.map((log) => (
-                    <div key={log.id} className="p-3.5 bg-white space-y-1">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-slate-900 text-xs">{log.summary}</span>
-                        <span className="text-[10px] font-mono text-slate-400">
-                          {log.created_at ? log.created_at.toDate().toLocaleString('ar-SA') : 'منذ قليل'}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 text-[11px] text-slate-500">
-                        <span>المسؤول: {log.actor_email}</span>
-                        <span>·</span>
-                        <span className="font-mono text-[10px]">{log.action}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+          {/* Search & Filter Controls */}
+          <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={appSearchQuery}
+                onChange={(e) => setAppSearchQuery(e.target.value)}
+                placeholder="ابحث باسم التطبيق..."
+                className="w-full pr-10 pl-4 py-2.5 text-sm rounded-xl border border-slate-300 bg-white focus:border-blue-600 focus:ring-2 focus:ring-blue-500/20 outline-hidden"
+              />
             </div>
-          )}
 
-          {/* ===================== TAB 5: TECHNICAL ===================== */}
-          {activeTab === 'technical' && (
-            <div className="space-y-4 text-xs">
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
-                <span className="font-bold text-slate-900 block text-sm">المعرّفات وتفاصيل الوكيل الفنية</span>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-slate-700">
-                  <div>
-                    <span className="text-slate-400 text-[10px] block">معرّف الجهاز (Auth UID)</span>
-                    <span className="font-mono text-xs text-slate-900 select-all block mt-0.5">
-                      {device.uid}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-slate-400 text-[10px] block">إصدار السياسة المخزنة</span>
-                    <span className="font-mono text-xs text-slate-900 block mt-0.5">
-                      الإصدار المطلوب: v{device.policy?.revision ?? 0} · الإصدار المطبق: v{device.status?.applied_revision ?? 0}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Repair Corrupted Policy Mode */}
-              {device.policy?.isCorrupted && (
-                <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-3">
-                  <div className="flex items-start gap-2.5 text-red-900 font-bold">
-                    <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                    <span>تنبيه: وثيقة السياسة في الخادم تحتوي على حقول تالفة أو غير صالحة</span>
-                  </div>
-                  <ul className="list-disc list-inside space-y-1 text-red-800 text-[11px]">
-                    {(device.policy.corruptionErrors || []).map((err, i) => (
-                      <li key={i}>{err}</li>
-                    ))}
-                  </ul>
-                  <label className="flex items-center gap-2 text-xs font-bold text-red-950 cursor-pointer pt-2">
-                    <input
-                      type="checkbox"
-                      checked={repairMode}
-                      onChange={(e) => setRepairMode(e.target.checked)}
-                      className="rounded border-red-400 text-red-700"
-                    />
-                    <span>تفعيل وضع تصحيح واستبدال الحقول التالفة عند الحفظ</span>
-                  </label>
-                </div>
-              )}
-
-              {/* Raw JSON documents inspect */}
-              <details className="p-4 bg-white border border-slate-200 rounded-xl">
-                <summary className="font-bold text-slate-800 cursor-pointer">
-                  معاينة مستندات Firestore الخام (JSON)
-                </summary>
-                <div className="mt-3 space-y-3 text-[11px]">
-                  <div>
-                    <span className="font-mono font-bold text-slate-700 block">enrollments/{device.uid}</span>
-                    <pre className="p-2.5 bg-slate-100 rounded-lg font-mono text-[10px] overflow-x-auto mt-1">
-                      {JSON.stringify(device.enrollment?.rawData || device.enrollment, null, 2)}
-                    </pre>
-                  </div>
-                  <div>
-                    <span className="font-mono font-bold text-slate-700 block">policies/{device.uid}</span>
-                    <pre className="p-2.5 bg-slate-100 rounded-lg font-mono text-[10px] overflow-x-auto mt-1">
-                      {JSON.stringify(device.policy?.rawData || device.policy, null, 2)}
-                    </pre>
-                  </div>
-                  <div>
-                    <span className="font-mono font-bold text-slate-700 block">deviceStatus/{device.uid}</span>
-                    <pre className="p-2.5 bg-slate-100 rounded-lg font-mono text-[10px] overflow-x-auto mt-1">
-                      {JSON.stringify(device.status, null, 2)}
-                    </pre>
-                  </div>
-                </div>
-              </details>
-            </div>
-          )}
-        </div>
-
-        {/* Drawer Footer */}
-        <div className="p-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs">
-          <span className="text-slate-500">
-            {isDirty ? 'توجد تغييرات غير محفوظة' : 'جميع البيانات متزامنة مع الخادم'}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-lg font-semibold transition-colors"
-            >
-              إغلاق
-            </button>
-            {isDirty && (
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
               <button
                 type="button"
-                disabled={savingPolicy}
-                onClick={handleSavePolicySubmit}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white rounded-lg font-bold transition-colors"
+                onClick={() => setAppFilter('all')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  appFilter === 'all'
+                    ? 'bg-white text-slate-900 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
               >
-                <Save className="w-3.5 h-3.5" />
-                <span>حفظ التعديلات</span>
+                الكل ({unifiedDeviceApps.length})
               </button>
+              <button
+                type="button"
+                onClick={() => setAppFilter('blocked')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  appFilter === 'blocked'
+                    ? 'bg-red-600 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                محظور ({blockedCount}/{MAX_BLOCKED_APPS})
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppFilter('allowed')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  appFilter === 'allowed'
+                    ? 'bg-emerald-600 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                {hasRealInventory ? `مسموح (${allowedCount})` : `غير محظور (${allowedCount})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppFilter('protected')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  appFilter === 'protected'
+                    ? 'bg-blue-600 text-white shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                محمي للنظام ({protectedCount})
+              </button>
+            </div>
+          </div>
+
+          {/* Batch Selection Bar */}
+          {selectedPackages.size > 0 && (
+            <div className="p-3.5 rounded-xl bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs font-bold">
+                تم تحديد {selectedPackages.size} تطبيق
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={() => void handleBatchDeviceAppsAction(false)}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 cursor-pointer"
+                >
+                  السماح بالمحدد
+                </button>
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={() => void handleBatchDeviceAppsAction(true)}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-red-600 hover:bg-red-500 text-white disabled:opacity-50 cursor-pointer"
+                >
+                  حظر المحدد
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedPackages(new Set())}
+                  className="px-2.5 py-1.5 rounded-lg text-xs text-slate-300 hover:text-white cursor-pointer"
+                >
+                  إلغاء التحديد
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Wide Responsive Grid of Applications */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            {filteredApps.map((app) => {
+              const isSelected = selectedPackages.has(app.package_name);
+              return (
+                <div
+                  key={app.package_name}
+                  className={`flex flex-col justify-between p-4 rounded-xl border transition-all ${
+                    app.isBlocked
+                      ? 'bg-red-50/40 border-red-200'
+                      : app.isProtected
+                      ? 'bg-slate-50/70 border-slate-200'
+                      : 'bg-white border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                      {!app.isProtected ? (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectPackage(app.package_name)}
+                          className="mt-1.5 w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shrink-0"
+                        />
+                      ) : (
+                        <div className="mt-1.5 w-4 h-4 shrink-0" />
+                      )}
+
+                      <div
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 ${
+                          app.isBlocked
+                            ? 'bg-red-100 text-red-800 border border-red-200'
+                            : app.isProtected
+                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                            : 'bg-slate-100 text-slate-700 border border-slate-200'
+                        }`}
+                      >
+                        {(app.app_name || '?').trim().charAt(0).toUpperCase()}
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <h4 className="text-sm font-bold text-slate-900 truncate">
+                            {app.app_name}
+                          </h4>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          {app.isProtected ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                              <Lock className="w-3 h-3" />
+                              محمي للنظام
+                            </span>
+                          ) : app.isBlocked ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-red-100 text-red-800 border border-red-200">
+                              محظور بالسياسة
+                            </span>
+                          ) : app.isInstalledOnDevice ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              مثبت ومسموح
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold bg-slate-100 text-slate-600 border border-slate-200">
+                              غير مدرج بالحظر (مقترح)
+                            </span>
+                          )}
+                        </div>
+
+                        {app.isProtected && app.protectedReason && (
+                          <p className="text-[11px] text-blue-700 mt-1.5 leading-relaxed">
+                            {app.protectedReason}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Action Button */}
+                    <div className="shrink-0">
+                      {app.isProtected ? (
+                        <span className="text-[11px] font-semibold text-slate-400 px-2 py-1">
+                          محمي
+                        </span>
+                      ) : app.isBlocked ? (
+                        <button
+                          type="button"
+                          disabled={savingPolicy}
+                          onClick={() => void handleInstantSingleAppToggle(app.package_name, false)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors shadow-2xs cursor-pointer"
+                        >
+                          السماح
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={savingPolicy}
+                          onClick={() => void handleInstantSingleAppToggle(app.package_name, true)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-red-600 border border-red-200 hover:bg-red-50 disabled:opacity-50 transition-colors cursor-pointer"
+                        >
+                          حظر التطبيق
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Optional / Collapsible Package Name Details */}
+                  {showPackageNames ? (
+                    <div className="mt-3 pt-2.5 border-t border-slate-200/70 flex items-center justify-between gap-2">
+                      <span className="font-mono text-[11px] text-slate-500 truncate" dir="ltr">
+                        {app.package_name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyPackage(app.package_name)}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-slate-800 shrink-0 cursor-pointer"
+                      >
+                        {copiedPkg === app.package_name ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            <span className="text-emerald-700">تم النسخ</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>نسخ المعرف</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  ) : (
+                    <details className="mt-2 pt-1.5 border-t border-slate-100 text-[11px] text-slate-400">
+                      <summary className="cursor-pointer hover:text-slate-600 select-none">
+                        معرف الحزمة التقني
+                      </summary>
+                      <div className="mt-1 flex items-center justify-between gap-2 bg-slate-50 px-2 py-1 rounded">
+                        <span className="font-mono text-slate-600 truncate" dir="ltr">
+                          {app.package_name}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyPackage(app.package_name)}
+                          className="text-blue-600 hover:underline font-semibold shrink-0 cursor-pointer"
+                        >
+                          {copiedPkg === app.package_name ? 'تم النسخ' : 'نسخ'}
+                        </button>
+                      </div>
+                    </details>
+                  )}
+                </div>
+              );
+            })}
+
+            {filteredApps.length === 0 && (
+              <div className="col-span-full py-12 text-center text-sm text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+                لا توجد تطبيقات تطابق البحث أو التصفية الحالية.
+              </div>
             )}
           </div>
         </div>
+      )}
+
+      {/* TAB 3: KIOSK (شاشة الشركة) — kept mounted while viewing device to preserve state */}
+      <div className={activeTab === 'kiosk' ? 'block' : 'hidden'}>
+        <KioskPanel
+          db={db}
+          uid={device.uid}
+          actor={actor}
+          approved={device.approvalState === 'approved'}
+          status={device.status}
+          devicePolicy={device.policy}
+          inventory={appInventory}
+          discardDraftSignal={effectiveDiscardSignal}
+          onDirtyChange={setKioskDirty}
+          onNavigateAdvancedSettings={onNavigateAdvancedSettings}
+        />
       </div>
+
+      {/* TAB 4: TETHERING (مشاركة الإنترنت) */}
+      {activeTab === 'tethering' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-xs space-y-6 max-w-3xl">
+          {policyRevisionConflict && (
+            <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 flex items-center justify-between gap-3 text-xs text-amber-950">
+              <div>
+                <p className="font-bold">
+                  تعارض إصدارات: وصلت سياسة أحدث من الخادم (الإصدار v{policyRevisionConflict.incoming} بينما مسودتك على v{policyRevisionConflict.pinned ?? 0}).
+                </p>
+                <p className="mt-0.5 text-amber-800">
+                  تم الحفاظ على تعديلاتك الحالية ولم تُستبدل تلقائيًا.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setBlockTethering(device.policy?.block_tethering ?? true);
+                  setBlockedApps(device.policy?.blocked_apps ? [...device.policy.blocked_apps] : []);
+                  setPolicyEdited(false);
+                  setPinnedPolicyRevision(device.policy?.revision ?? null);
+                  setPolicyRevisionConflict(null);
+                }}
+                className="px-3 py-1.5 rounded-lg bg-amber-800 text-white font-bold shrink-0 cursor-pointer"
+              >
+                اعتماد نسخة الخادم
+              </button>
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-100">
+            <div className="space-y-1">
+              <h3 className="text-base font-bold text-slate-900">التحكم في مشاركة الإنترنت ونقطة الاتصال</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                عند تفعيل المنع، يوقف الهاتف نقطة الاتصال اللاسلكية (Wi-Fi Hotspot) ومشاركة الإنترنت عبر البلوتوث أو الكابل لمنع استهلاك باقة بيانات العمل.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 bg-slate-50 px-4 py-2.5 rounded-xl border border-slate-200 shrink-0">
+              <span className="text-xs font-bold text-slate-700">منع مشاركة الإنترنت:</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={blockTethering}
+                onClick={() => {
+                  if (!policyEdited) {
+                    setPolicyEdited(true);
+                    setPinnedPolicyRevision(device.policy?.revision ?? null);
+                  }
+                  setBlockTethering(!blockTethering);
+                }}
+                className={`relative inline-flex h-7 w-13 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
+                  blockTethering ? 'bg-blue-600' : 'bg-slate-300'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                    blockTethering ? '-translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+              <span className={`text-xs font-bold ${blockTethering ? 'text-blue-700' : 'text-slate-500'}`}>
+                {blockTethering ? 'ممنوعة' : 'مسموحة'}
+              </span>
+            </div>
+          </div>
+
+          {/* Comparison Cards in Plain Arabic */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-xs font-semibold text-slate-500">الإعداد المحفوظ في الخادم</span>
+              <div className="text-sm font-bold text-slate-900">
+                {device.policy === null
+                  ? 'لم تُحفظ سياسة بعد'
+                  : device.policy.block_tethering
+                  ? 'مشاركة الإنترنت ممنوعة'
+                  : 'مشاركة الإنترنت مسموحة'}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+              <span className="text-xs font-semibold text-slate-500">حالة التأكيد من الهاتف</span>
+              <div className="text-sm font-bold text-slate-900">
+                {device.enforcementState === 'applied'
+                  ? 'مؤكدة ومطبقة على الهاتف'
+                  : device.enforcementState === 'pending'
+                  ? 'بانتظار تأكيد الهاتف'
+                  : device.enforcementState === 'error'
+                  ? 'أبلغ الهاتف عن مشكلة في التطبيق'
+                  : 'لم يطبق بعد'}
+              </div>
+            </div>
+          </div>
+
+          {policyError && (
+            <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{policyError}</span>
+            </div>
+          )}
+
+          {policySuccess && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+              <span>{policySuccess}</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              disabled={savingPolicy}
+              onClick={() => void handleSaveTethering()}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+            >
+              <Save className="w-4 h-4" />
+              <span>{savingPolicy ? 'جارٍ الحفظ...' : 'حفظ إعدادات مشاركة الإنترنت'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: HISTORY (سجل الجهاز) */}
+      {activeTab === 'history' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">سجل عمليات هذا الجهاز</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                جميع التعديلات الإدارية المسجلة على هذا الجهاز مرتبة من الأحدث إلى الأقدم.
+              </p>
+            </div>
+            <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold">
+              {deviceLogs.length} عملية
+            </span>
+          </div>
+
+          {deviceLogs.length === 0 ? (
+            <div className="py-12 text-center text-sm text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
+              لا توجد عمليات مسجلة لهذا الجهاز حتى الآن.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-right border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-xs font-bold text-slate-600">
+                    <th className="py-3 px-4">الوقت</th>
+                    <th className="py-3 px-4">المدير</th>
+                    <th className="py-3 px-4">الإجراء</th>
+                    <th className="py-3 px-4">ملخص التغيير</th>
+                    <th className="py-3 px-4">التفاصيل التقنية</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 text-xs">
+                  {deviceLogs.map((log) => {
+                    const tsInfo = formatTimestampAr(log.created_at?.toMillis?.() ?? null);
+                    return (
+                      <tr key={log.id} className="hover:bg-slate-50/80 transition-colors align-top">
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="font-bold text-slate-900">{tsInfo.relative}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">{tsInfo.formatted}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="font-semibold text-slate-800" dir="ltr">{log.actor_email}</div>
+                        </td>
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <span className="inline-flex px-2.5 py-1 rounded-md text-xs font-bold bg-blue-50 text-blue-800 border border-blue-200">
+                            {ACTION_LABELS[log.action] || log.action}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-800 leading-relaxed max-w-md">
+                          {formatAuditLogSummaryAr(log, deviceMap)}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <details className="text-xs">
+                            <summary className="cursor-pointer text-blue-600 hover:text-blue-800 font-bold select-none">
+                              عرض القيم الخام
+                            </summary>
+                            <div className="mt-2 p-2.5 rounded-lg bg-slate-900 text-slate-100 font-mono text-[11px] space-y-2 max-w-xs overflow-x-auto" dir="ltr">
+                              <div>
+                                <span className="text-slate-400 block">Before:</span>
+                                <pre>{JSON.stringify(log.before, null, 2)}</pre>
+                              </div>
+                              <div>
+                                <span className="text-slate-400 block">After:</span>
+                                <pre>{JSON.stringify(log.after, null, 2)}</pre>
+                              </div>
+                            </div>
+                          </details>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Archiving Confirmation Modal */}
+      {showArchiveConfirmModal && device && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200 space-y-4 text-right" dir="rtl">
+            <div className="flex items-center gap-3 text-slate-900 font-bold text-base">
+              <div className="p-2.5 rounded-xl bg-slate-100 text-slate-700 shrink-0">
+                <Archive className="w-5 h-5" />
+              </div>
+              <span>إزالة الجهاز من القائمة الرئيسية</span>
+            </div>
+
+            <div className="space-y-3 text-sm text-slate-700 leading-relaxed">
+              <div className="font-bold text-slate-900">
+                اسم الجهاز: {friendlyName}
+              </div>
+              <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 font-semibold leading-relaxed">
+                سيُخفى الجهاز من القائمة الرئيسية، وستبقى إدارته وقيوده على الهاتف كما هي
+              </div>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                لن يتم حذف أي وثائق أو تسجيلات أو حسابات. يمكنك استعادة ظهور الجهاز في أي وقت عبر تبويب «الأجهزة المؤرشفة».
+              </p>
+            </div>
+
+            {archiveError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+                {archiveError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowArchiveConfirmModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-bold bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 transition-colors cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={savingArchive}
+                onClick={() => handleArchiveToggle(true)}
+                className="px-5 py-2.5 rounded-xl text-xs font-bold bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+              >
+                {savingArchive ? 'جارٍ الإزالة...' : 'تأكيد إزالة الجهاز من القائمة'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

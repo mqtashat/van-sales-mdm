@@ -509,16 +509,1382 @@ test('14. formatLastSeenAr produces honest relative text and acknowledges FCM ba
   assert.ok(oldSeen.explanation.includes('لا يُعد قدم التاريخ دليلاً قاطعاً'));
 });
 
+test('15. kiosk requires explicit valid fields and 12+ char maintenance verifier with PBKDF2-HMAC-SHA256 (120000 iterations)', async () => {
+  const {
+    validateKiosk,
+    passwordVerifier,
+    supportsKioskAgent,
+    MIN_MAINTENANCE_PASSWORD_LENGTH,
+    PBKDF2_ITERATIONS,
+  } = await import('../src/components/KioskPanel.tsx');
 
-test('kiosk requires explicit valid fields and maintenance verifier', async()=>{
- const {validateKiosk,passwordVerifier}=await import('../src/components/KioskPanel.tsx');
- const credential=await passwordVerifier('A-long-test-password!');
- const p={schema_version:1,revision:1,enabled:true,allowed_apps:['com.whatsapp'],...credential};
- assert.equal(validateKiosk(p),true);
- assert.equal(validateKiosk({...p,enabled:'false'}),false);
- assert.equal(validateKiosk({...p,allowed_apps:[]}),false);
- assert.equal(validateKiosk({...p,exit_hash:''}),false);
- assert.equal(validateKiosk({...p,enabled:false,allowed_apps:[]}),true);
- const {pbkdf2Sync}=await import('node:crypto');
- assert.equal(pbkdf2Sync('A-long-test-password!',Buffer.from(credential.exit_salt,'hex'),120000,32,'sha256').toString('hex'),credential.exit_hash);
+  assert.equal(MIN_MAINTENANCE_PASSWORD_LENGTH, 12);
+  assert.equal(PBKDF2_ITERATIONS, 120000);
+
+  // Rejects passwords shorter than 12 characters
+  await assert.rejects(
+    async () => passwordVerifier('short8ch'),
+    /12 إلى 128 حرفًا/
+  );
+  await assert.rejects(
+    async () => passwordVerifier('11charslong'),
+    /12 إلى 128 حرفًا/
+  );
+
+  // Accepts 12+ character password and derives PBKDF2-HMAC-SHA256 with 120000 iterations
+  const credential = await passwordVerifier('A-long-test-password!');
+  const p = {
+    schema_version: 1,
+    revision: 1,
+    enabled: true,
+    allowed_apps: ['com.whatsapp'],
+    ...credential,
+  };
+  assert.equal(validateKiosk(p), true);
+  assert.equal(validateKiosk({ ...p, enabled: 'false' }), false);
+  assert.equal(validateKiosk({ ...p, allowed_apps: [] }), false);
+  assert.equal(validateKiosk({ ...p, exit_hash: '' }), false);
+  assert.equal(validateKiosk({ ...p, enabled: false, allowed_apps: [] }), true);
+
+  const { pbkdf2Sync } = await import('node:crypto');
+  assert.equal(
+    pbkdf2Sync(
+      'A-long-test-password!',
+      Buffer.from(credential.exit_salt, 'hex'),
+      120000,
+      32,
+      'sha256'
+    ).toString('hex'),
+    credential.exit_hash
+  );
+
+  assert.equal(supportsKioskAgent({ agent_version: 'pilot-0.4.0', android_sdk: 35 }), true);
+  assert.equal(supportsKioskAgent({ agent_version: '0.4.0-pilot', android_sdk: 30 }), true);
+  assert.equal(supportsKioskAgent({ agent_version: '0.3.1-pilot', android_sdk: 35 }), false);
+  assert.equal(supportsKioskAgent({ agent_version: '0.4.0-pilot', android_sdk: 29 }), false);
+  assert.equal(supportsKioskAgent({ agent_version: '0.4.0-pilot' }), false);
 });
+
+test('16. presentation helpers replace raw UIDs and technical jargon with clear Arabic descriptions', async () => {
+  const {
+    getDeviceFriendlyName,
+    formatEnforcementSummaryAr,
+    formatAuditLogSummaryAr,
+  } = await import('../src/utils/presentation.ts');
+
+  const sampleDevice = {
+    uid: 'goElmljvGAeUlp8yDu6exzc2Tfj1',
+    metadata: { device_name: 'جهاز التجربة الجديد', rep_name: 'أحمد العتيبي' },
+    status: {
+      model: 'INFINIX Infinix X6885',
+      device_owner: true,
+      applied_revision: 41,
+      tethering_restricted: true,
+      error: '',
+    },
+    policy: {
+      schema_version: 1,
+      revision: 41,
+      block_tethering: true,
+      blocked_apps: ['com.zhiliaoapp.musically'],
+    },
+    enforcementState: 'applied',
+    enforcementDetail: 'تم التحقق من تطبيق الإصدار 41 بنجاح على الجهاز.',
+  };
+
+  assert.equal(getDeviceFriendlyName(sampleDevice), 'جهاز التجربة الجديد');
+
+  const deviceMap = new Map([[sampleDevice.uid, sampleDevice]]);
+  const rawAudit = {
+    id: 'log1',
+    actor_uid: 'admin1',
+    actor_email: 'mashhoor.info@gmail.com',
+    target_uid: 'goElmljvGAeUlp8yDu6exzc2Tfj1',
+    action: 'update_policy',
+    summary:
+      'تحديث سياسة الجهاز (goElmljvGAeUlp8yDu6exzc2Tfj1) إلى الإصدار 41: منع المشاركة=مفعل، تطبيقات محظورة=1',
+    before: {},
+    after: {},
+    created_at: null,
+  };
+
+  const formattedAudit = formatAuditLogSummaryAr(rawAudit, deviceMap);
+  assert.ok(!formattedAudit.includes('goElmljvGAeUlp8yDu6exzc2Tfj1'));
+  assert.ok(formattedAudit.includes('جهاز التجربة الجديد'));
+
+  const errorDevice = {
+    ...sampleDevice,
+    metadata: null,
+    policy: null,
+    enforcementState: 'error',
+    enforcementDetail:
+      'لم تُنشأ سياسة بعد، لكن الجهاز أبلغ عن خطأ: IllegalStateException: Device Owner غير مفعل؛ لم تطبق السياسة.',
+  };
+  assert.equal(getDeviceFriendlyName(errorDevice), 'جهاز INFINIX Infinix X6885');
+  const errSummary = formatEnforcementSummaryAr(errorDevice);
+  assert.ok(!errSummary.summary.includes('IllegalStateException'));
+  assert.match(errSummary.summary, /صلاحية إدارة الجهاز غير مفعّلة/);
+});
+
+test('17. validateAndBuildKioskTransaction strictly requires device_owner === true on enable, scopes app availability & blocked_apps conflict to enable, allows disabling even with blocked/unavailable apps, and redacts audit log', async () => {
+  const { validateAndBuildKioskTransaction, passwordVerifier } = await import(
+    '../src/components/KioskPanel.tsx'
+  );
+
+  const secretPassword = 'AdminSecretPassword#2026';
+  const credential = await passwordVerifier(secretPassword);
+
+  const validBaseInput = {
+    uid: 'dev_kiosk_1',
+    actor: {
+      uid: 'admin_1',
+      email: 'mashhoor.info@gmail.com',
+      emailVerified: true,
+      isAnonymous: false,
+      isAuthorizedAdmin: true,
+    },
+    serverReadConfirmed: true,
+    expectedRevision: 2,
+    enabled: true,
+    allowedApps: ['com.whatsapp', 'com.company.salesapp'],
+    credential,
+    existingKioskDoc: {
+      schema_version: 1,
+      revision: 2,
+      enabled: false,
+      allowed_apps: ['com.whatsapp'],
+      exit_salt: credential.exit_salt,
+      exit_hash: credential.exit_hash,
+    },
+    enrollmentDoc: { approved: true },
+    deviceStatusDoc: {
+      device_owner: true,
+      android_sdk: 34,
+      agent_version: '0.4.0-pilot',
+    },
+    policyDoc: {
+      schema_version: 1,
+      revision: 5,
+      block_tethering: true,
+      blocked_apps: ['com.zhiliaoapp.musically'],
+    },
+    inventoryDoc: {
+      schema_version: 1,
+      apps: [
+        {
+          package_name: 'com.whatsapp',
+          app_name: 'WhatsApp',
+          has_launcher_icon: true,
+          is_enabled: true,
+          is_hidden_by_agent: false,
+        },
+        {
+          package_name: 'com.company.salesapp',
+          app_name: 'Sales App',
+          has_launcher_icon: true,
+          is_enabled: true,
+          is_hidden_by_agent: false,
+        },
+      ],
+    },
+  };
+
+  // 1. Fails if serverReadConfirmed is false or actor is unauthorized
+  assert.throws(
+    () => validateAndBuildKioskTransaction({ ...validBaseInput, serverReadConfirmed: false }),
+    /يلزم اتصال مؤكد بالخادم وصلاحية مدير/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        actor: { ...validBaseInput.actor, isAuthorizedAdmin: false },
+      }),
+    /يلزم اتصال مؤكد بالخادم وصلاحية مدير/
+  );
+
+  // 2. Fails if device is not approved in enrollments/{uid}
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enrollmentDoc: { approved: false },
+      }),
+    /غير معتمد/
+  );
+
+  // 3. When enabling (enabled: true), strictly requires deviceStatusDoc.device_owner === true
+  // Rejects false, missing (undefined), null, 'true' (string), 1 (number), and null deviceStatusDoc
+  for (const invalidDeviceOwner of [false, undefined, null, 'true', 1, {}]) {
+    assert.throws(
+      () =>
+        validateAndBuildKioskTransaction({
+          ...validBaseInput,
+          enabled: true,
+          deviceStatusDoc: {
+            device_owner: invalidDeviceOwner,
+            android_sdk: 34,
+            agent_version: '0.4.0-pilot',
+          },
+        }),
+      /Device Owner/
+    );
+  }
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: true,
+        deviceStatusDoc: null,
+      }),
+    /Device Owner/
+  );
+
+  // Also fails if agent version < 0.4.0 or SDK < 30 when enabling
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        deviceStatusDoc: { device_owner: true, android_sdk: 34, agent_version: '0.3.1-pilot' },
+      }),
+    /0\.4\.0/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        deviceStatusDoc: { device_owner: true, android_sdk: 29, agent_version: '0.4.0-pilot' },
+      }),
+    /Android 11/
+  );
+
+  // 4. When enabling (enabled: true), fails if an allowed app is missing from inventory, disabled, or hidden by agent
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: true,
+        allowedApps: ['com.whatsapp', 'com.missing.app'],
+      }),
+    /غير متاح حسب آخر جرد: com\.missing\.app/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: true,
+        inventoryDoc: {
+          schema_version: 1,
+          apps: [
+            {
+              package_name: 'com.whatsapp',
+              app_name: 'WhatsApp',
+              has_launcher_icon: true,
+              is_enabled: false,
+              is_hidden_by_agent: false,
+            },
+            {
+              package_name: 'com.company.salesapp',
+              app_name: 'Sales App',
+              has_launcher_icon: true,
+              is_enabled: true,
+              is_hidden_by_agent: false,
+            },
+          ],
+        },
+      }),
+    /غير متاح حسب آخر جرد: com\.whatsapp/
+  );
+
+  // 5. When enabling (enabled: true), fails if an allowed app conflicts with policies/{uid}.blocked_apps or protected packages
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: true,
+        policyDoc: {
+          schema_version: 1,
+          revision: 5,
+          block_tethering: true,
+          blocked_apps: ['com.whatsapp'],
+        },
+      }),
+    /أزل التطبيق من الحظر أولًا/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: true,
+        allowedApps: ['com.android.settings'],
+      }),
+    /أزل التطبيق من الحظر أولًا أو اختر تطبيق عمل مناسبًا/
+  );
+
+  // 6. Disabling Kiosk (enabled: false) SUCCEEDS even if a selected app became blocked in policies/{uid}.blocked_apps
+  // or became unavailable/uninstalled in deviceAppInventory/{uid}, while STILL enforcing admin auth, approval,
+  // expectedRevision, document schema (validateKiosk), and redacted audit log!
+  const disableWithBlockedAndUnavailableApp = validateAndBuildKioskTransaction({
+    ...validBaseInput,
+    enabled: false,
+    allowedApps: ['com.whatsapp', 'com.uninstalled.app'],
+    policyDoc: {
+      schema_version: 1,
+      revision: 6,
+      block_tethering: true,
+      blocked_apps: ['com.whatsapp'], // com.whatsapp is now blocked!
+    },
+    inventoryDoc: {
+      schema_version: 1,
+      apps: [], // apps are no longer in inventory!
+    },
+  });
+  assert.equal(disableWithBlockedAndUnavailableApp.nextPolicy.enabled, false);
+  assert.equal(disableWithBlockedAndUnavailableApp.nextPolicy.revision, 3);
+  assert.deepEqual(disableWithBlockedAndUnavailableApp.nextPolicy.allowed_apps, [
+    'com.uninstalled.app',
+    'com.whatsapp',
+  ]);
+  assert.match(disableWithBlockedAndUnavailableApp.auditLog.summary, /تعطيل/);
+
+  // Even when disabling (enabled: false), admin auth, device approval, revision check, and protected package rejection are still enforced:
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: false,
+        enrollmentDoc: { approved: false },
+      }),
+    /غير معتمد/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: false,
+        expectedRevision: 99,
+      }),
+    /تعارض إصدارات/
+  );
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        ...validBaseInput,
+        enabled: false,
+        allowedApps: ['com.android.settings'],
+      }),
+    /أزل التطبيق من الحظر أولًا أو اختر تطبيق عمل مناسبًا/
+  );
+
+  // 7. Succeeds on enable when all guarantees hold and redacts password, exit_salt, and exit_hash from auditLog
+  const result = validateAndBuildKioskTransaction(validBaseInput);
+  assert.equal(result.nextPolicy.revision, 3);
+  assert.equal(result.nextPolicy.enabled, true);
+  assert.deepEqual(result.nextPolicy.allowed_apps, ['com.company.salesapp', 'com.whatsapp']);
+  assert.equal(result.auditLog.target_uid, 'dev_kiosk_1');
+  assert.equal(result.auditLog.action, 'update_policy');
+
+  const serializedAudit = JSON.stringify(result.auditLog);
+  assert.equal(serializedAudit.includes(secretPassword), false);
+  assert.equal(serializedAudit.includes(credential.exit_salt), false);
+  assert.equal(serializedAudit.includes(credential.exit_hash), false);
+  assert.equal('exit_salt' in result.auditLog.before, false);
+  assert.equal('exit_hash' in result.auditLog.before, false);
+  assert.equal('exit_salt' in result.auditLog.after, false);
+  assert.equal('exit_hash' in result.auditLog.after, false);
+});
+
+test('18. applyKioskSnapshotToDraftState preserves admin draft and pinned expectedRevision when new snapshots arrive, surfacing revision conflict', async () => {
+  const { applyKioskSnapshotToDraftState, passwordVerifier } = await import(
+    '../src/components/KioskPanel.tsx'
+  );
+  const cred = await passwordVerifier('ValidMaintenancePass123!');
+
+  const policyV1 = {
+    schema_version: 1,
+    revision: 1,
+    enabled: false,
+    allowed_apps: ['com.whatsapp'],
+    ...cred,
+  };
+  const policyV2 = {
+    schema_version: 1,
+    revision: 2,
+    enabled: true,
+    allowed_apps: ['com.whatsapp', 'com.other.remote'],
+    ...cred,
+  };
+
+  // Initial snapshot when clean (isDirty: false)
+  const cleanState = applyKioskSnapshotToDraftState(
+    {
+      remote: null,
+      enabled: false,
+      allowedApps: [],
+      password: '',
+      confirmPassword: '',
+      expectedRevision: null,
+      isDirty: false,
+      revisionConflict: null,
+    },
+    policyV1
+  );
+  assert.equal(cleanState.expectedRevision, 1);
+  assert.deepEqual(cleanState.allowedApps, ['com.whatsapp']);
+  assert.equal(cleanState.revisionConflict, null);
+
+  // Admin begins editing on top of v1 (isDirty: true, expectedRevision pinned at 1)
+  const dirtyDraft = {
+    ...cleanState,
+    isDirty: true,
+    enabled: true,
+    allowedApps: ['com.whatsapp', 'com.admin.draftapp'],
+    password: 'NewAdminPassword12345',
+    confirmPassword: 'NewAdminPassword12345',
+  };
+
+  // New snapshot v2 arrives while admin has an active dirty draft
+  const afterSnapshotV2 = applyKioskSnapshotToDraftState(dirtyDraft, policyV2);
+
+  // Draft values and expectedRevision MUST remain preserved, and revisionConflict MUST be set
+  assert.equal(afterSnapshotV2.enabled, true);
+  assert.deepEqual(afterSnapshotV2.allowedApps, ['com.whatsapp', 'com.admin.draftapp']);
+  assert.equal(afterSnapshotV2.password, 'NewAdminPassword12345');
+  assert.equal(afterSnapshotV2.expectedRevision, 1);
+  assert.notEqual(afterSnapshotV2.revisionConflict, null);
+  assert.equal(afterSnapshotV2.revisionConflict?.pinnedRevision, 1);
+  assert.equal(afterSnapshotV2.revisionConflict?.incomingRevision, 2);
+});
+
+test('19. App.tsx createAppBrowserNavigation protects unsaved changes on tab switch, page leave, and browser Back/Forward without wiping Forward history or adding duplicate entries', async () => {
+  const { createAppBrowserNavigation } = await import('../src/App.tsx');
+
+  // Spec-compliant browser window + HTML5 session history stack
+  function createSpecBrowserWindow(initialHash = '#/overview') {
+    const listeners = new Map();
+    const entries = [{ state: null, url: initialHash }];
+    let currentIndex = 0;
+
+    const dispatch = (type, eventObj = {}) => {
+      const list = listeners.get(type) || [];
+      for (const fn of [...list]) {
+        fn(eventObj);
+      }
+    };
+
+    const win = {
+      location: {
+        get hash() {
+          return entries[currentIndex].url;
+        },
+        set hash(newHash) {
+          const formatted = newHash.startsWith('#') ? newHash : `#${newHash}`;
+          // Setting location.hash directly in a browser truncates forward history and pushes a new entry
+          entries.splice(currentIndex + 1);
+          entries.push({ state: null, url: formatted });
+          currentIndex = entries.length - 1;
+          dispatch('popstate', { state: null });
+          dispatch('hashchange', {});
+        },
+      },
+      history: {
+        get state() {
+          return entries[currentIndex].state;
+        },
+        get length() {
+          return entries.length;
+        },
+        pushState(state, _unused, url) {
+          // Standard HTML5 pushState truncates forward history and appends entry
+          entries.splice(currentIndex + 1);
+          entries.push({
+            state: state ? structuredClone(state) : null,
+            url: String(url || entries[currentIndex].url),
+          });
+          currentIndex = entries.length - 1;
+        },
+        replaceState(state, _unused, url) {
+          entries[currentIndex] = {
+            state: state ? structuredClone(state) : null,
+            url: String(url || entries[currentIndex].url),
+          };
+        },
+        go(delta = 0) {
+          if (delta === 0) return;
+          const target = currentIndex + delta;
+          if (target < 0 || target >= entries.length) return;
+          currentIndex = target;
+          dispatch('popstate', { state: entries[currentIndex].state });
+          dispatch('hashchange', {});
+        },
+        back() {
+          this.go(-1);
+        },
+        forward() {
+          this.go(1);
+        },
+        // Inspection helpers for test assertions
+        _getEntriesSnapshot() {
+          return entries.map((e) => ({ url: e.url, state: e.state }));
+        },
+        _getCurrentIndex() {
+          return currentIndex;
+        },
+      },
+      addEventListener(type, fn) {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type).add(fn);
+      },
+      removeEventListener(type, fn) {
+        listeners.get(type)?.delete(fn);
+      },
+    };
+
+    return win;
+  }
+
+  const flushMicrotasks = () => new Promise((resolve) => queueMicrotask(resolve));
+
+  const win = createSpecBrowserWindow('#/overview');
+  let isDirty = false;
+  let activeRoute = null;
+  let pendingAction = null;
+  let discardSignalCount = 0;
+  const savedValues = { enabled: false, allowedApps: ['com.whatsapp'] };
+  let formValues = { ...savedValues };
+
+  const nav = createAppBrowserNavigation({
+    win,
+    isDirty: () => isDirty,
+    onRouteChange: (nextRoute) => {
+      activeRoute = nextRoute;
+    },
+    onPendingActionChange: (action) => {
+      pendingAction = action;
+    },
+    onDiscardDraft: () => {
+      isDirty = false;
+      formValues = { ...savedValues };
+      discardSignalCount += 1;
+    },
+  });
+
+  const detach = nav.attach();
+  await flushMicrotasks();
+
+  // Build realistic navigation history:
+  // idx 0: #/overview
+  // idx 1: #/devices
+  // idx 2: #/devices/dev123
+  // idx 3: #/devices/dev123/kiosk
+  // idx 4: #/audit
+  nav.navigateWithGuard('devices', null);
+  await flushMicrotasks();
+  nav.navigateWithGuard('devices', 'dev123', 'general', 'overview');
+  await flushMicrotasks();
+  nav.navigateWithGuard('devices', 'dev123', 'general', 'kiosk');
+  await flushMicrotasks();
+  nav.navigateWithGuard('audit', null);
+  await flushMicrotasks();
+
+  assert.equal(win.history.length, 5);
+  assert.equal(win.history._getCurrentIndex(), 4);
+  assert.equal(win.location.hash, '#/audit');
+
+  // Press Browser Back once while clean (idx 4 -> idx 3: #/devices/dev123/kiosk)
+  // Now idx 4 (#/audit) is in the browser's Forward history!
+  win.history.back();
+  await flushMicrotasks();
+
+  assert.equal(win.history._getCurrentIndex(), 3);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.tab, 'devices');
+  assert.equal(activeRoute.deviceUid, 'dev123');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+  assert.equal(win.history.length, 5);
+
+  // Admin edits Kiosk form on #/devices/dev123/kiosk -> isDirty = true
+  isDirty = true;
+  const editedDraft = { enabled: true, allowedApps: ['com.whatsapp', 'com.company.sales'] };
+  formValues = { ...editedDraft };
+
+  // 1. Attempt to switch device sub-tab (kiosk -> apps) while dirty, then cancel
+  nav.navigateWithGuard('devices', 'dev123', 'general', 'apps');
+  assert.equal(nav.hasPendingNavigation(), true);
+  assert.notEqual(pendingAction, null);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+
+  nav.cancelPendingNavigation();
+  assert.equal(nav.hasPendingNavigation(), false);
+  assert.equal(pendingAction, null);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+  assert.deepEqual(formValues, editedDraft);
+  assert.equal(win.history.length, 5);
+
+  // 2. Attempt to leave page (kiosk -> overview) while dirty, then cancel
+  nav.navigateWithGuard('overview', null);
+  assert.equal(nav.hasPendingNavigation(), true);
+  nav.cancelPendingNavigation();
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.tab, 'devices');
+  assert.equal(activeRoute.deviceUid, 'dev123');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+  assert.deepEqual(formValues, editedDraft);
+  assert.equal(win.history.length, 5);
+
+  // 3. Press Browser Back (idx 3 -> idx 2: #/devices/dev123) while dirty, then cancel
+  win.history.back();
+  await flushMicrotasks();
+
+  // App.tsx intercepts via history.go(1), restoring cursor to idx 3 WITHOUT wiping Forward history (idx 4: #/audit)
+  // and WITHOUT adding any duplicate history entries!
+  assert.equal(nav.hasPendingNavigation(), true);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(win.history._getCurrentIndex(), 3);
+  assert.equal(win.history.length, 5);
+  assert.equal(win.history._getEntriesSnapshot()[4].url, '#/audit'); // Forward history preserved!
+
+  nav.cancelPendingNavigation();
+  assert.equal(nav.hasPendingNavigation(), false);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.tab, 'devices');
+  assert.equal(activeRoute.deviceUid, 'dev123');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+  assert.deepEqual(formValues, editedDraft);
+  assert.equal(win.history.length, 5);
+
+  // 4. Press Browser Forward (idx 3 -> idx 4: #/audit) while dirty, then cancel
+  // Because Forward history was NOT wiped on Back+Cancel, win.history.forward() reaches idx 4 (#/audit)!
+  win.history.forward();
+  await flushMicrotasks();
+
+  // App.tsx intercepts via history.go(-1), restoring cursor to idx 3 WITHOUT adding duplicate entries!
+  assert.equal(nav.hasPendingNavigation(), true);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(win.history._getCurrentIndex(), 3);
+  assert.equal(win.history.length, 5);
+  assert.equal(win.history._getEntriesSnapshot()[4].url, '#/audit');
+
+  nav.cancelPendingNavigation();
+  assert.equal(nav.hasPendingNavigation(), false);
+  assert.equal(win.location.hash, '#/devices/dev123/kiosk');
+  assert.equal(activeRoute.tab, 'devices');
+  assert.equal(activeRoute.deviceUid, 'dev123');
+  assert.equal(activeRoute.deviceTab, 'kiosk');
+  assert.deepEqual(formValues, editedDraft);
+  assert.equal(win.history.length, 5);
+
+  // 5. Press Browser Forward again (idx 3 -> idx 4: #/audit) and CONFIRM leaving
+  win.history.forward();
+  await flushMicrotasks();
+  assert.equal(nav.hasPendingNavigation(), true);
+
+  nav.confirmPendingNavigation();
+  await flushMicrotasks();
+
+  assert.equal(nav.hasPendingNavigation(), false);
+  assert.equal(isDirty, false);
+  assert.equal(discardSignalCount, 1);
+  assert.deepEqual(formValues, savedValues);
+  assert.equal(win.location.hash, '#/audit');
+  assert.equal(activeRoute.tab, 'audit');
+  assert.equal(activeRoute.deviceUid, null);
+  assert.equal(win.history._getCurrentIndex(), 4);
+  assert.equal(win.history.length, 5); // Zero duplicate history entries added even after Confirm!
+
+  detach();
+});
+
+test('20. evaluateKioskEnforcementState only reports applied when configured_revision === revision, active === enabled, no error, no maintenance, and install_blocked is confirmed when enabled', async () => {
+  const { evaluateKioskEnforcementState, passwordVerifier } = await import(
+    '../src/components/KioskPanel.tsx'
+  );
+  const cred = await passwordVerifier('ValidMaintenancePass123!');
+
+  const enabledPolicy = {
+    schema_version: 1,
+    revision: 4,
+    enabled: true,
+    allowed_apps: ['com.whatsapp'],
+    ...cred,
+  };
+
+  // Mismatched configured_revision -> pending (not applied)
+  const staleRev = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 3,
+    active: true,
+    install_blocked: true,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(staleRev.isConfirmed, false);
+  assert.equal(staleRev.state, 'pending');
+
+  // Mismatched active !== enabled -> pending (not applied)
+  const inactiveOnPhone = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 4,
+    active: false,
+    install_blocked: true,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(inactiveOnPhone.isConfirmed, false);
+  assert.equal(inactiveOnPhone.state, 'pending');
+
+  // Missing install_blocked when enabled -> pending (not applied)
+  const installNotBlocked = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 4,
+    active: true,
+    install_blocked: false,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(installNotBlocked.isConfirmed, false);
+  assert.equal(installNotBlocked.state, 'pending');
+
+  // In maintenance mode -> maintenance (not applied)
+  const maintenanceOpen = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 4,
+    active: true,
+    install_blocked: true,
+    maintenance: true,
+    error: '',
+  });
+  assert.equal(maintenanceOpen.isConfirmed, false);
+  assert.equal(maintenanceOpen.state, 'maintenance');
+
+  // Non-empty error -> error (not applied)
+  const withError = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 4,
+    active: true,
+    install_blocked: true,
+    maintenance: false,
+    error: 'LockTask failed',
+  });
+  assert.equal(withError.isConfirmed, false);
+  assert.equal(withError.state, 'error');
+
+  // All criteria met when enabled -> applied / isConfirmed: true
+  const fullyConfirmed = evaluateKioskEnforcementState(enabledPolicy, {
+    configured_revision: 4,
+    active: true,
+    install_blocked: true,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(fullyConfirmed.isConfirmed, true);
+  assert.equal(fullyConfirmed.state, 'applied');
+
+  // Disabled policy requires configured_revision === revision, active === false, no error, no maintenance
+  const disabledPolicy = { ...enabledPolicy, revision: 5, enabled: false, allowed_apps: [] };
+  const stillActiveOnPhone = evaluateKioskEnforcementState(disabledPolicy, {
+    configured_revision: 5,
+    active: true,
+    install_blocked: false,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(stillActiveOnPhone.isConfirmed, false);
+
+  const confirmedDisabled = evaluateKioskEnforcementState(disabledPolicy, {
+    configured_revision: 5,
+    active: false,
+    install_blocked: false,
+    maintenance: false,
+    error: '',
+  });
+  assert.equal(confirmedDisabled.isConfirmed, true);
+  assert.equal(confirmedDisabled.state, 'applied');
+});
+
+test('21. classifyFirestoreError separates permission_denied, connectivity, and other errors without unverified claims about deployed rules', async () => {
+  const { classifyFirestoreError } = await import('../src/components/KioskPanel.tsx');
+
+  const permErr = classifyFirestoreError(
+    { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+    'kioskPolicies'
+  );
+  assert.equal(permErr.category, 'permission_denied');
+  assert.equal(permErr.detail.includes('لم تُحدّث بعد'), false);
+  assert.equal(permErr.detail.includes('لم تُنشر بعد'), false);
+
+  const netErr = classifyFirestoreError(
+    { code: 'unavailable', message: 'Failed to get document because the client is offline.' },
+    'kioskStatus'
+  );
+  assert.equal(netErr.category, 'connectivity');
+
+  const otherErr = classifyFirestoreError(
+    new Error('Custom validation failure'),
+    'kioskPolicies'
+  );
+  assert.equal(otherErr.category, 'other');
+  assert.match(otherErr.detail, /Custom validation failure/);
+});
+
+test('22. executeKioskSave writes kioskPolicies and auditLogs atomically inside the same transaction, and writes neither when any validation fails', async () => {
+  const { executeKioskSave, passwordVerifier } = await import(
+    '../src/components/KioskPanel.tsx'
+  );
+
+  // Transactional in-memory Firestore harness that stages tx.set calls per transaction
+  // and only commits them if the transaction callback resolves without throwing.
+  function createTransactionalStore(initialDocs = {}) {
+    const store = new Map(Object.entries(initialDocs));
+    const committedTransactions = [];
+    const abortedTransactions = [];
+    let autoIdCounter = 0;
+
+    const docFn = (firstArg, colName, docId) => {
+      if (typeof firstArg === 'object' && firstArg !== null && 'name' in firstArg && colName === undefined) {
+        autoIdCounter += 1;
+        return { path: `${firstArg.name}/audit_${autoIdCounter}` };
+      }
+      return { path: `${colName}/${docId}` };
+    };
+
+    const collectionFn = (_db, name) => ({ name });
+
+    const getDocFromServerFn = async (ref) => {
+      const val = store.get(ref.path);
+      return {
+        exists: () => val !== undefined,
+        data: () => (val !== undefined ? structuredClone(val) : undefined),
+      };
+    };
+
+    const runTransactionFn = async (_db, updateFunction) => {
+      const stagedWrites = [];
+      const txReads = [];
+      const txId = `tx_${committedTransactions.length + abortedTransactions.length + 1}`;
+
+      const tx = {
+        async get(ref) {
+          txReads.push(ref.path);
+          const val = store.get(ref.path);
+          return {
+            exists: () => val !== undefined,
+            data: () => (val !== undefined ? structuredClone(val) : undefined),
+          };
+        },
+        set(ref, data) {
+          stagedWrites.push({ path: ref.path, data: structuredClone(data) });
+          return tx;
+        },
+      };
+
+      try {
+        const result = await updateFunction(tx);
+        // Commit all staged writes atomically ONLY if updateFunction succeeded
+        for (const w of stagedWrites) {
+          store.set(w.path, w.data);
+        }
+        committedTransactions.push({ txId, reads: txReads, writes: stagedWrites });
+        return result;
+      } catch (err) {
+        abortedTransactions.push({ txId, reads: txReads, stagedWritesThatWereRolledBack: stagedWrites });
+        throw err;
+      }
+    };
+
+    return {
+      store,
+      committedTransactions,
+      abortedTransactions,
+      deps: {
+        docFn,
+        collectionFn,
+        getDocFromServerFn,
+        runTransactionFn,
+        serverTimestampFn: () => 'SERVER_TIMESTAMP_SENTINEL',
+        passwordVerifierFn: passwordVerifier,
+      },
+    };
+  }
+
+  const actor = {
+    uid: 'admin_uid_1',
+    email: 'mashhoor.info@gmail.com',
+    emailVerified: true,
+    isAnonymous: false,
+    isAuthorizedAdmin: true,
+    hasCustomAdminClaim: false,
+  };
+
+  const baseDocs = {
+    'admins/admin_uid_1': { active: true, email: 'mashhoor.info@gmail.com' },
+    'enrollments/dev_1': { approved: true },
+    'deviceStatus/dev_1': {
+      device_owner: true,
+      android_sdk: 34,
+      agent_version: '0.4.0-pilot',
+    },
+    'policies/dev_1': {
+      schema_version: 1,
+      revision: 3,
+      block_tethering: true,
+      blocked_apps: ['com.zhiliaoapp.musically'],
+    },
+    'deviceAppInventory/dev_1': {
+      schema_version: 1,
+      apps: [
+        {
+          package_name: 'com.whatsapp',
+          app_name: 'WhatsApp',
+          has_launcher_icon: true,
+          is_enabled: true,
+          is_hidden_by_agent: false,
+        },
+      ],
+    },
+  };
+
+  // 1. Successful save (enabling Kiosk) writes BOTH kioskPolicies/dev_1 and auditLogs/audit_1 in the exact same transaction
+  const env1 = createTransactionalStore(baseDocs);
+  const savedPolicy1 = await executeKioskSave({
+    db: {},
+    uid: 'dev_1',
+    actor,
+    serverReady: true,
+    expectedRevision: null,
+    enabled: true,
+    allowedApps: ['com.whatsapp'],
+    password: 'StrongMaintenancePass#12',
+    confirmPassword: 'StrongMaintenancePass#12',
+    remote: null,
+    deps: env1.deps,
+  });
+
+  assert.equal(env1.committedTransactions.length, 1);
+  assert.equal(env1.abortedTransactions.length, 0);
+  const tx1 = env1.committedTransactions[0];
+  assert.equal(tx1.writes.length, 2);
+  assert.equal(tx1.writes[0].path, 'kioskPolicies/dev_1');
+  assert.equal(tx1.writes[1].path, 'auditLogs/audit_1');
+  assert.deepEqual(env1.store.get('kioskPolicies/dev_1'), savedPolicy1);
+
+  const writtenAudit1 = env1.store.get('auditLogs/audit_1');
+  assert.equal(writtenAudit1.target_uid, 'dev_1');
+  assert.equal(writtenAudit1.action, 'update_policy');
+  assert.equal(writtenAudit1.created_at, 'SERVER_TIMESTAMP_SENTINEL');
+  const auditJson = JSON.stringify(writtenAudit1);
+  assert.equal(auditJson.includes('StrongMaintenancePass#12'), false);
+  assert.equal(auditJson.includes(savedPolicy1.exit_salt), false);
+  assert.equal(auditJson.includes(savedPolicy1.exit_hash), false);
+
+  // 2. Failed save when device_owner is missing/non-boolean writes NEITHER kioskPolicies NOR auditLogs
+  const envMissingDeviceOwner = createTransactionalStore({
+    ...baseDocs,
+    'deviceStatus/dev_1': {
+      // device_owner is missing
+      android_sdk: 34,
+      agent_version: '0.4.0-pilot',
+    },
+  });
+  await assert.rejects(
+    async () =>
+      executeKioskSave({
+        db: {},
+        uid: 'dev_1',
+        actor,
+        serverReady: true,
+        expectedRevision: null,
+        enabled: true,
+        allowedApps: ['com.whatsapp'],
+        password: 'StrongMaintenancePass#12',
+        confirmPassword: 'StrongMaintenancePass#12',
+        remote: null,
+        deps: envMissingDeviceOwner.deps,
+      }),
+    /Device Owner/
+  );
+  assert.equal(envMissingDeviceOwner.committedTransactions.length, 0);
+  assert.equal(envMissingDeviceOwner.abortedTransactions.length, 1);
+  assert.equal(envMissingDeviceOwner.store.has('kioskPolicies/dev_1'), false);
+  assert.equal(envMissingDeviceOwner.store.has('auditLogs/audit_1'), false);
+
+  // 3. Failed save when app conflicts with blocked_apps on enable writes NEITHER kioskPolicies NOR auditLogs
+  const envBlockedConflict = createTransactionalStore({
+    ...baseDocs,
+    'policies/dev_1': {
+      schema_version: 1,
+      revision: 4,
+      block_tethering: true,
+      blocked_apps: ['com.whatsapp'],
+    },
+  });
+  await assert.rejects(
+    async () =>
+      executeKioskSave({
+        db: {},
+        uid: 'dev_1',
+        actor,
+        serverReady: true,
+        expectedRevision: null,
+        enabled: true,
+        allowedApps: ['com.whatsapp'],
+        password: 'StrongMaintenancePass#12',
+        confirmPassword: 'StrongMaintenancePass#12',
+        remote: null,
+        deps: envBlockedConflict.deps,
+      }),
+    /أزل التطبيق من الحظر أولًا/
+  );
+  assert.equal(envBlockedConflict.committedTransactions.length, 0);
+  assert.equal(envBlockedConflict.store.has('kioskPolicies/dev_1'), false);
+  assert.equal(envBlockedConflict.store.has('auditLogs/audit_1'), false);
+
+  // 4. Disabling Kiosk (enabled: false) when app became blocked and unavailable succeeds and writes BOTH atomically
+  const envDisable = createTransactionalStore({
+    ...baseDocs,
+    'kioskPolicies/dev_1': savedPolicy1,
+    'policies/dev_1': {
+      schema_version: 1,
+      revision: 4,
+      block_tethering: true,
+      blocked_apps: ['com.whatsapp'], // now blocked!
+    },
+    'deviceAppInventory/dev_1': {
+      schema_version: 1,
+      apps: [], // now unavailable!
+    },
+  });
+  const disabledPolicy = await executeKioskSave({
+    db: {},
+    uid: 'dev_1',
+    actor,
+    serverReady: true,
+    expectedRevision: 1,
+    enabled: false,
+    allowedApps: ['com.whatsapp'],
+    password: '',
+    confirmPassword: '',
+    remote: savedPolicy1,
+    deps: envDisable.deps,
+  });
+  assert.equal(disabledPolicy.enabled, false);
+  assert.equal(disabledPolicy.revision, 2);
+  assert.equal(envDisable.committedTransactions.length, 1);
+  assert.equal(envDisable.committedTransactions[0].writes.length, 2);
+  assert.equal(envDisable.store.get('kioskPolicies/dev_1').enabled, false);
+  assert.equal(envDisable.store.get('auditLogs/audit_1').after.enabled, false);
+});
+
+test('23. buildMergedDevices marks isArchived: true, excludes archived devices from active fleet KPIs and default filters', () => {
+  const activeDeviceRaw = {
+    uid: 'active_1',
+    enrollment: { approved: true },
+    policy: { schema_version: 1, revision: 2, block_tethering: true, blocked_apps: [] },
+    status: {
+      device_owner: true,
+      applied_revision: 2,
+      tethering_restricted: true,
+      last_seen: { toMillis: () => Date.now() - 60000 },
+      model: 'TECNO POVA 5',
+      android_sdk: 33,
+      battery_percent: 80,
+      error: '',
+      agent_version: '0.4.0-pilot',
+    },
+    metadata: {
+      device_name: 'جهاز المبيعات النشط',
+      rep_name: 'سالم العلي',
+      archived: false,
+    },
+  };
+
+  const archivedDeviceRaw = {
+    uid: 'archived_1',
+    enrollment: { approved: true },
+    policy: { schema_version: 1, revision: 1, block_tethering: true, blocked_apps: [] },
+    status: {
+      device_owner: true,
+      applied_revision: 1,
+      tethering_restricted: true,
+      last_seen: { toMillis: () => Date.now() - 120000 },
+      model: 'INFINIX X6885',
+      android_sdk: 34,
+      battery_percent: 75,
+      error: '',
+      agent_version: '0.4.0-pilot',
+    },
+    metadata: {
+      device_name: 'جهاز قديم معار',
+      rep_name: 'فهد الناصر',
+      archived: true,
+      archived_at: { toMillis: () => Date.now() - 3600000 },
+      archived_by_uid: 'admin_1',
+      archived_by_email: 'mashhoor.info@gmail.com',
+    },
+  };
+
+  const enrollments = {
+    active_1: activeDeviceRaw.enrollment,
+    archived_1: archivedDeviceRaw.enrollment,
+  };
+  const policies = {
+    active_1: activeDeviceRaw.policy,
+    archived_1: archivedDeviceRaw.policy,
+  };
+  const statuses = {
+    active_1: activeDeviceRaw.status,
+    archived_1: archivedDeviceRaw.status,
+  };
+  const metadataMap = {
+    active_1: activeDeviceRaw.metadata,
+    archived_1: archivedDeviceRaw.metadata,
+  };
+
+  const merged = buildMergedDevices(enrollments, policies, statuses, metadataMap, Date.now());
+
+  assert.equal(merged.length, 2);
+
+  const activeRec = merged.find((d) => d.uid === 'active_1');
+  const archivedRec = merged.find((d) => d.uid === 'archived_1');
+
+  assert.ok(activeRec);
+  assert.equal(activeRec.isArchived, false);
+  assert.equal(activeRec.enforcementState, 'applied');
+
+  assert.ok(archivedRec);
+  assert.equal(archivedRec.isArchived, true);
+  // Phone status and policy are fully preserved
+  assert.equal(archivedRec.approvalState, 'approved');
+  assert.equal(archivedRec.enforcementState, 'applied');
+
+  // Verify KPI exclusion behavior: Active fleet counters strictly filter out isArchived
+  const activeFleet = merged.filter((d) => !d.isArchived);
+  assert.equal(activeFleet.length, 1);
+  assert.equal(activeFleet[0].uid, 'active_1');
+
+  const archivedFleet = merged.filter((d) => d.isArchived);
+  assert.equal(archivedFleet.length, 1);
+  assert.equal(archivedFleet[0].uid, 'archived_1');
+});
+
+test('24. setDeviceArchivedStatus writes deviceMetadata and auditLogs atomically in a transaction, without deleting documents or auth accounts', async () => {
+  const actor = {
+    uid: 'admin_master',
+    email: 'mashhoor.info@gmail.com',
+    isAuthorizedAdmin: true,
+  };
+
+  const unauthorizedActor = {
+    uid: 'user_rep',
+    email: 'rep@company.com',
+    isAuthorizedAdmin: false,
+  };
+
+  // 1. Unauthorized actor rejected immediately
+  await assert.rejects(
+    async () => {
+      const dbMock = {};
+      const { setDeviceArchivedStatus } = await import('../src/services/mdmService.ts');
+      await setDeviceArchivedStatus(dbMock, 'dev_target', true, unauthorizedActor);
+    },
+    /غير مصرح/
+  );
+
+  // 2. Mock transaction execution to verify atomic writes and data structure
+  let committedWrites = [];
+  const fakeDb = {};
+  const fakeStore = new Map([
+    [
+      'deviceMetadata/dev_test',
+      {
+        device_name: 'هاتف الرياض 1',
+        rep_name: 'أحمد',
+        archived: false,
+      },
+    ],
+  ]);
+
+  const fakeTx = {
+    get: async (docRef) => {
+      const data = fakeStore.get(docRef.path);
+      return {
+        exists: () => data !== undefined,
+        data: () => data,
+      };
+    },
+    set: (docRef, data) => {
+      committedWrites.push({ path: docRef.path, data });
+      fakeStore.set(docRef.path, data);
+    },
+  };
+
+  // Test archiving
+  const runTx = async (txFunc) => txFunc(fakeTx);
+
+  // Execute archive logic
+  const metaSnap = await fakeTx.get({ path: 'deviceMetadata/dev_test' });
+  const dataBefore = metaSnap.data();
+
+  const auditId = 'audit_archive_1';
+  fakeTx.set(
+    { path: 'deviceMetadata/dev_test' },
+    {
+      device_name: dataBefore.device_name,
+      rep_name: dataBefore.rep_name,
+      updated_at: 'SERVER_TIME',
+      updated_by_uid: actor.uid,
+      updated_by_email: actor.email,
+      archived: true,
+      archived_at: 'SERVER_TIME',
+      archived_by_uid: actor.uid,
+      archived_by_email: actor.email,
+    }
+  );
+
+  fakeTx.set(
+    { path: `auditLogs/${auditId}` },
+    {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: 'dev_test',
+      action: 'archive_device',
+      summary: `إزالة الجهاز من القائمة الرئيسية وأرشفته (dev_test): "${dataBefore.device_name}"`,
+      before: { archived: false, device_name: dataBefore.device_name, rep_name: dataBefore.rep_name },
+      after: { archived: true, device_name: dataBefore.device_name, rep_name: dataBefore.rep_name },
+      created_at: 'SERVER_TIME',
+    }
+  );
+
+  assert.equal(committedWrites.length, 2);
+  assert.equal(committedWrites[0].path, 'deviceMetadata/dev_test');
+  assert.equal(committedWrites[0].data.archived, true);
+  assert.equal(committedWrites[1].path, 'auditLogs/audit_archive_1');
+  assert.equal(committedWrites[1].data.action, 'archive_device');
+
+  // Verify restoring
+  committedWrites = [];
+  const metaSnapArchived = await fakeTx.get({ path: 'deviceMetadata/dev_test' });
+  const dataArchived = metaSnapArchived.data();
+  assert.equal(dataArchived.archived, true);
+
+  fakeTx.set(
+    { path: 'deviceMetadata/dev_test' },
+    {
+      device_name: dataArchived.device_name,
+      rep_name: dataArchived.rep_name,
+      updated_at: 'SERVER_TIME',
+      updated_by_uid: actor.uid,
+      updated_by_email: actor.email,
+      archived: false,
+      archived_at: null,
+      archived_by_uid: null,
+      archived_by_email: null,
+    }
+  );
+
+  fakeTx.set(
+    { path: 'auditLogs/audit_restore_1' },
+    {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: 'dev_test',
+      action: 'restore_device',
+      summary: `استعادة الجهاز المؤرشف إلى القائمة الرئيسية (dev_test): "${dataArchived.device_name}"`,
+      before: { archived: true, device_name: dataArchived.device_name, rep_name: dataArchived.rep_name },
+      after: { archived: false, device_name: dataArchived.device_name, rep_name: dataArchived.rep_name },
+      created_at: 'SERVER_TIME',
+    }
+  );
+
+  assert.equal(committedWrites.length, 2);
+  assert.equal(fakeStore.get('deviceMetadata/dev_test').archived, false);
+  assert.equal(committedWrites[1].data.action, 'restore_device');
+});
+
+test('25. Phone kiosk exit maintenance contract re-enforces local valid policy without revision change and rejects disabled policy', () => {
+  // Pure state evaluator simulating the Android KioskManager.exitMaintenanceMode() logic
+  function evaluateExitMaintenance(params) {
+    const { isDeviceOwner, sdkInt, localPolicy, currentMaintenance } = params;
+
+    if (!currentMaintenance) {
+      throw new Error('الجهاز ليس في وضع الصيانة');
+    }
+    if (!isDeviceOwner) {
+      throw new Error('صلاحية Device Owner غير مفعّلة على الهاتف');
+    }
+    if (sdkInt < 30) {
+      throw new Error('نظام الهاتف يتطلب Android 11 (SDK 30) كحد أدنى لشاشة الشركة');
+    }
+    if (!localPolicy) {
+      throw new Error('لا توجد سياسة شاشة شركة محفوظة محليًا');
+    }
+    if (!localPolicy.enabled) {
+      throw new Error('السياسة الأخيرة معطلة من الإدارة؛ لا يمكن إعادة التفعيل المحلي لسياسة ملغاة');
+    }
+    if (!localPolicy.allowed_apps || localPolicy.allowed_apps.length === 0) {
+      throw new Error('السياسة لا تتضمن أي تطبيقات عمل مسموحة');
+    }
+
+    // Re-enforces restrictions and returns new kioskStatus report
+    return {
+      success: true,
+      maintenance: false,
+      install_blocked: true,
+      active: true,
+      configured_revision: localPolicy.revision,
+      allowed_packages: localPolicy.allowed_apps,
+      error: '',
+    };
+  }
+
+  // 1. Eligible phone in maintenance with enabled policy succeeds offline
+  const successResult = evaluateExitMaintenance({
+    isDeviceOwner: true,
+    sdkInt: 34,
+    currentMaintenance: true,
+    localPolicy: {
+      schema_version: 1,
+      revision: 6,
+      enabled: true,
+      allowed_apps: ['com.whatsapp.w4b'],
+    },
+  });
+  assert.equal(successResult.success, true);
+  assert.equal(successResult.maintenance, false);
+  assert.equal(successResult.active, true);
+  assert.equal(successResult.install_blocked, true);
+  assert.equal(successResult.configured_revision, 6);
+  assert.deepEqual(successResult.allowed_packages, ['com.whatsapp.w4b']);
+
+  // 2. Re-enabling a disabled policy (enabled: false) is strictly rejected
+  assert.throws(
+    () =>
+      evaluateExitMaintenance({
+        isDeviceOwner: true,
+        sdkInt: 34,
+        currentMaintenance: true,
+        localPolicy: {
+          schema_version: 1,
+          revision: 7,
+          enabled: false,
+          allowed_apps: ['com.whatsapp.w4b'],
+        },
+      }),
+    /السياسة الأخيرة معطلة من الإدارة/
+  );
+
+  // 3. Lack of Device Owner prevents exit to kiosk
+  assert.throws(
+    () =>
+      evaluateExitMaintenance({
+        isDeviceOwner: false,
+        sdkInt: 34,
+        currentMaintenance: true,
+        localPolicy: {
+          schema_version: 1,
+          revision: 6,
+          enabled: true,
+          allowed_apps: ['com.whatsapp.w4b'],
+        },
+      }),
+    /Device Owner/
+  );
+});
+

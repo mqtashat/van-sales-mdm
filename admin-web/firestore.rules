@@ -89,12 +89,19 @@ service cloud.firestore {
 
     function isValidDeviceMetadata(data) {
       return data.keys().hasAll(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email'])
-        && data.keys().hasOnly(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email'])
+        && data.keys().hasOnly(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email', 'archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])
         && data.device_name is string && data.device_name.size() <= 120
         && data.rep_name is string && data.rep_name.size() <= 120
         && data.updated_at == request.time
         && data.updated_by_uid is string && data.updated_by_uid == request.auth.uid
-        && data.updated_by_email is string && data.updated_by_email == request.auth.token.email;
+        && data.updated_by_email is string && data.updated_by_email == request.auth.token.email
+        && (!('archived' in data) || (
+          data.archived is bool
+          && ((request.method == 'update' && !data.diff(resource.data).affectedKeys().hasAny(['archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])) || (
+          (!('archived_at' in data) || data.archived_at == null || data.archived_at == request.time)
+          && (!('archived_by_uid' in data) || data.archived_by_uid == null || (data.archived_by_uid is string && data.archived_by_uid == request.auth.uid))
+          && (!('archived_by_email' in data) || data.archived_by_email == null || (data.archived_by_email is string && data.archived_by_email == request.auth.token.email))))
+        ));
     }
 
     function isValidAuditLog(data) {
@@ -103,7 +110,7 @@ service cloud.firestore {
         && data.actor_uid is string && data.actor_uid == request.auth.uid
         && data.actor_email is string && data.actor_email == request.auth.token.email
         && data.target_uid is string && isValidId(data.target_uid)
-        && data.action is string && data.action in ['approve_device', 'revoke_approval', 'create_policy', 'update_policy', 'update_metadata']
+        && data.action is string && data.action in ['approve_device', 'revoke_approval', 'create_policy', 'update_policy', 'update_metadata', 'archive_device', 'restore_device']
         && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500
         && data.before is map
         && data.after is map
@@ -140,7 +147,7 @@ service cloud.firestore {
 
     // 4. Separate Administrative Metadata (Device Label & Sales Representative Name)
     match /deviceMetadata/{uid} {
-      allow get: if isValidId(uid) && isAdmin();
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
       allow list: if isAdmin();
       allow create, update: if isValidId(uid) && isValidDeviceMetadata(request.resource.data) && isAdmin();
       allow delete: if false;
