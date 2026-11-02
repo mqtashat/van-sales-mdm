@@ -20,16 +20,18 @@ public class KioskRecoveryTest {
   d.addUserRestriction(a,UserManager.DISALLOW_INSTALL_APPS);
   KioskController.prefs(c).edit().putBoolean("managed",true).putBoolean("enabled",true)
     .putStringSet("owned_restrictions",Set.of(UserManager.DISALLOW_INSTALL_APPS)).commit();
+  assertTrue(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_CONFIG_TETHERING));
+  assertTrue(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_INSTALL_APPS));
   KioskController.disable(c);
   assertFalse(KioskController.enabled(c));
-  assertFalse(d.getUserRestrictions(a).getBoolean(UserManager.DISALLOW_INSTALL_APPS));
-  assertTrue(d.getUserRestrictions(a).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING));
-  assertTrue(d.getUserRestrictions(a).getBoolean(UserManager.DISALLOW_SAFE_BOOT));
+  assertFalse(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_INSTALL_APPS));
+  assertTrue(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_CONFIG_TETHERING));
+  assertTrue(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_SAFE_BOOT));
  }
  @Test public void missingTargetDoesNotActivateKioskOrRestrictInstallation() throws Exception {
   Application c=RuntimeEnvironment.getApplication();DevicePolicyManager d=KioskController.dpm(c);Shadows.shadowOf(d).setDeviceOwner(KioskController.admin(c));
   KioskPolicy p=new KioskPolicy(1,true,Set.of("com.missing.app"),"a".repeat(32),"b".repeat(64));
   assertThrows(IllegalArgumentException.class,()->KioskController.apply(c,p));
-  assertFalse(KioskController.enabled(c));assertFalse(d.getUserRestrictions(KioskController.admin(c)).getBoolean(UserManager.DISALLOW_INSTALL_APPS));
+  assertFalse(KioskController.enabled(c));assertFalse(((UserManager)c.getSystemService(Context.USER_SERVICE)).hasUserRestriction(UserManager.DISALLOW_INSTALL_APPS));
  }
 }

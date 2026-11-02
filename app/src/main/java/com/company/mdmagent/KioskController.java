@@ -54,7 +54,8 @@ final class KioskController {
                 |DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO|DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
                 |DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS|DevicePolicyManager.LOCK_TASK_FEATURE_BLOCK_ACTIVITY_START_IN_TASK);
         for(String r:RESTRICTIONS)d.addUserRestriction(a,r);
-        c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
+        if (c.getPackageManager().getComponentEnabledSetting(new ComponentName(c,KioskActivity.class)) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+            c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
         d.addPersistentPreferredActivity(a,homeFilter(),new ComponentName(c,KioskActivity.class));
         if (!new HashSet<>(Arrays.asList(d.getLockTaskPackages(a))).equals(list)) throw new IllegalStateException("تعذر تأكيد التطبيقات المسموحة");
         for(String r:RESTRICTIONS) if(!d.getUserRestrictions(a).getBoolean(r)) throw new IllegalStateException("تعذر تأكيد قيد شاشة الشركة: "+r);
