@@ -14,6 +14,7 @@ import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 
 final class KioskController {
+    static final java.util.concurrent.ExecutorService LOCAL = java.util.concurrent.Executors.newSingleThreadExecutor();
     static final String PREFS="injaz-kiosk";
     static final String[] RESTRICTIONS={UserManager.DISALLOW_INSTALL_APPS,UserManager.DISALLOW_UNINSTALL_APPS,UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES,
             UserManager.DISALLOW_SAFE_BOOT,UserManager.DISALLOW_ADD_USER,UserManager.DISALLOW_CREATE_WINDOWS};

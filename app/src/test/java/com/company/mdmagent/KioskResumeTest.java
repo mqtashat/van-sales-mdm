@@ -60,7 +60,7 @@ public class KioskResumeTest {
     }
     @Test public void failedResumeRetainsMaintenanceAndCredential()throws Exception{
         legacyMaintenance();KioskController.apply(c,policy(7,true));
-        Shadows.shadowOf(d).clearDeviceOwner();
+        d.clearDeviceOwnerApp(c.getPackageName());
         assertThrows(IllegalStateException.class,()->KioskController.resumeMaintenance(c,"uid1"));
         assertTrue(KioskController.inMaintenance(c));assertEquals("b".repeat(64),KioskController.prefs(c).getString("exit_hash",""));
         assertFalse(KioskController.prefs(c).getString("last_error","").isEmpty());

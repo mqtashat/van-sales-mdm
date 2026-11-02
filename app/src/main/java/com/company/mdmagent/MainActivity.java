@@ -113,7 +113,7 @@ public class MainActivity extends Activity {
         resumeKiosk.setOnClickListener(v -> {
             if(resumingKiosk)return;
             resumingKiosk=true;resumeKiosk.setEnabled(false);
-            AgentApp.SYNC.execute(() -> {
+            KioskController.LOCAL.execute(() -> {
                 String error="";
                 try { KioskController.resumeMaintenance(getApplicationContext(),SyncEngine.getCurrentAuthenticatedUid()); }
                 catch(Exception ex){error=KioskController.errorText(ex);}

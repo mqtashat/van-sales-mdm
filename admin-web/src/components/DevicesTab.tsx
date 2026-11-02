@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { Firestore } from 'firebase/firestore';
 import {
   MergedDeviceRecord,
@@ -117,6 +117,13 @@ export const DevicesTab: React.FC<DevicesTabProps> = ({
 
   const activeDevices = useMemo(() => devices.filter((d) => !d.isArchived), [devices]);
   const archivedDevices = useMemo(() => devices.filter((d) => d.isArchived), [devices]);
+  useEffect(() => {
+    const eligible = new Set(activeDevices.map(d => d.uid));
+    setSelectedUids(previous => {
+      const next = new Set([...previous].filter(uid => eligible.has(uid)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [activeDevices]);
 
   const counts = useMemo(() => {
     return {
@@ -730,8 +737,8 @@ export const DevicesTab: React.FC<DevicesTabProps> = ({
         <BulkActionModal
           isOpen={true}
           onClose={() => setBulkModalConfig(null)}
-          devices={devices}
-          selectedUids={Array.from(selectedUids)}
+          devices={activeDevices}
+          selectedUids={Array.from(selectedUids).filter(uid => activeDevices.some(d => d.uid === uid))}
           actionType={bulkModalConfig.actionType}
           actionParams={bulkModalConfig.actionParams}
           db={db}
