@@ -26,6 +26,8 @@ public class MainActivity extends Activity {
     private TextView identity;
     private TextView status;
     private Button sync;
+    private Button resumeKiosk;
+    private boolean resumingKiosk;
     private boolean notificationPermissionRequested = false;
     private final SharedPreferences.OnSharedPreferenceChangeListener pushStatusListener =
             (preferences, key) -> runOnUiThread(this::updateIdentityView);
@@ -49,7 +51,7 @@ public class MainActivity extends Activity {
 
         TextView description = new TextView(this);
         description.setText(
-                "نسخة اختبار لجهاز واحد (0.4.0-pilot): منع مشاركة الإنترنت وإخفاء التطبيقات التي تحددها الإدارة، بما فيها التطبيقات المثبتة مسبقًا غير الأساسية. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات ولا يلغي إشراف Family Link. تعذر حظر تطبيق لا يوقف تنفيذ بقية السياسة.\n\n"
+                "نسخة اختبار لجهاز واحد (0.4.1-pilot): منع مشاركة الإنترنت وإخفاء التطبيقات التي تحددها الإدارة، بما فيها التطبيقات المثبتة مسبقًا غير الأساسية. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات ولا يلغي إشراف Family Link. تعذر حظر تطبيق لا يوقف تنفيذ بقية السياسة.\n\n"
                 + "ترسل: نوع الجهاز، إصدار أندرويد، البطارية، حالة الصلاحية والسياسة ووقت المزامنة. لا تجمع موقعًا أو صورًا أو جهات اتصال.\n"
         );
         box.addView(description);
@@ -104,6 +106,27 @@ public class MainActivity extends Activity {
             SyncEngine.requestSync(getApplicationContext(), "ui_manual_button");
         });
 
+        resumeKiosk = new Button(this);
+        resumeKiosk.setText("إنهاء الصيانة والعودة لشاشة الشركة");
+        resumeKiosk.setVisibility(KioskController.inMaintenance(this)?View.VISIBLE:View.GONE);
+        box.addView(resumeKiosk);
+        resumeKiosk.setOnClickListener(v -> {
+            if(resumingKiosk)return;
+            resumingKiosk=true;resumeKiosk.setEnabled(false);
+            AgentApp.SYNC.execute(() -> {
+                String error="";
+                try { KioskController.resumeMaintenance(getApplicationContext(),SyncEngine.getCurrentAuthenticatedUid()); }
+                catch(Exception ex){error=KioskController.errorText(ex);}
+                final String result=error;
+                runOnUiThread(() -> {
+                    resumingKiosk=false;resumeKiosk.setEnabled(true);
+                    resumeKiosk.setVisibility(KioskController.inMaintenance(this)?View.VISIBLE:View.GONE);
+                    if(!result.isEmpty())status.setText(result);
+                });
+                KioskController.queueStatus(getApplicationContext());
+            });
+        });
+
         status = new TextView(this);
         status.setTextIsSelectable(true);
         box.addView(status);
@@ -115,7 +138,7 @@ public class MainActivity extends Activity {
                 + "• تصل تنبيهات تحديث السياسة عبر FCM بعد تسجيل الجهاز ونشر وظائف الخادم؛ التنبيه ليس تأكيدًا للتطبيق.\n"
                 + "• يبقى WorkManager الدوري (كل 15 دقيقة أو أكثر بحسب النظام) مسارًا احتياطيًا، مع استعادة الخدمة بعد إعادة تشغيل الهاتف ضمن قيود أندرويد.\n"
                 + "• يظل استقبال التحديثات بالخلفية معتمدًا على توفر الإنترنت وسياسات نظام الهاتف لتوفير الطاقة، بينما تبقى القيود المطبقة سارية حتى دون إنترنت.\n"
-                + "• لا توجد أزرار محلية لفك القيود؛ المسؤول يغيّر السياسة في Firebase."
+                + "• يستطيع المدير إنهاء الصيانة والعودة لشاشة الشركة من هذا التطبيق؛ الحظر ومنع المشاركة يبقيان حسب سياسة الإدارة."
         );
         box.addView(note);
     }
@@ -134,6 +157,7 @@ public class MainActivity extends Activity {
                 status.setText(message);
             }
             updateIdentityView();
+            if(resumeKiosk!=null)resumeKiosk.setVisibility(KioskController.inMaintenance(this)?View.VISIBLE:View.GONE);
         });
         attachAndSync("activity_onStart");
     }

@@ -58,6 +58,10 @@ export interface DeviceMetadataDoc {
   updated_at: Timestamp | null;
   updated_by_uid: string;
   updated_by_email: string;
+  archived?: boolean;
+  archived_at?: Timestamp | null;
+  archived_by_uid?: string | null;
+  archived_by_email?: string | null;
 }
 
 export type AuditActionType =
@@ -65,7 +69,9 @@ export type AuditActionType =
   | 'revoke_approval'
   | 'create_policy'
   | 'update_policy'
-  | 'update_metadata';
+  | 'update_metadata'
+  | 'archive_device'
+  | 'restore_device';
 
 /**
  * auditLogs/{logId}
@@ -113,6 +119,7 @@ export interface MergedDeviceRecord {
   enforcementDetail: string;
   isStaleConnection: boolean;
   lastSeenMs: number | null;
+  isArchived: boolean;
   presentInCollections: {
     enrollments: boolean;
     policies: boolean;

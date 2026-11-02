@@ -10,7 +10,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:contract": "node --import tsx --test tests/contract.test.mjs",
-    "test:rules": "firebase emulators:exec --only firestore --project vansales-mdm \"node --test tests/rules.test.mjs\""
+    "test:rules": "firebase emulators:exec --only firestore --project demo-mdm \"node --test tests/rules.test.mjs\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

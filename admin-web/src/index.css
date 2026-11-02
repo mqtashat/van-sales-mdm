@@ -2,19 +2,25 @@
 
 @layer base {
   :root {
-    font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
+    font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     direction: rtl;
+    font-size: 15px;
+    line-height: 1.6;
   }
 
+  html,
   body {
     background-color: #f8fafc;
     color: #0f172a;
     margin: 0;
     padding: 0;
+    overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
   }
 
-  code, pre, .font-mono {
+  code,
+  pre,
+  .font-mono {
     font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-variant-numeric: tabular-nums;
   }

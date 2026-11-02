@@ -300,7 +300,6 @@ test('9. deviceAppInventory: approved device writes own inventory; foreign/unapp
   await assertFails(getDoc(doc(deviceA, 'deviceAppInventory/b')));
 });
 
-
 const kiosk = (revision=1) => ({schema_version:1,revision,enabled:true,allowed_apps:['com.whatsapp'],exit_salt:'a'.repeat(32),exit_hash:'b'.repeat(64)});
 test('kiosk policy is admin-only, revisioned and cannot be deleted to unlock', async()=>{
  const admin=env.authenticatedContext('consoleAdmin',{email:'mashhoor.info@gmail.com',email_verified:true,firebase:{sign_in_provider:'password'}}).firestore();
@@ -330,4 +329,110 @@ test('package validation rejects separator injection, nonstrings and long names 
   await assertFails(setDoc(doc(db,'kioskPolicies/a'),{...kiosk(),allowed_apps:apps}));
  }
  await assertSucceeds(setDoc(doc(db,'kioskPolicies/a'),{...kiosk(),allowed_apps:Array.from({length:50},(_,i)=>`com.app.x${i}`)}));
+});
+
+test('deviceMetadata: approved device reads only its own metadata for name display, cannot list or alter; admin archives and restores', async () => {
+  const adminDb = env.authenticatedContext('consoleAdmin', {
+    email: 'mashhoor.info@gmail.com',
+    email_verified: true,
+    admin: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+  const phoneA = env.authenticatedContext('a', { firebase: { sign_in_provider: 'anonymous' } }).firestore();
+  const phoneB = env.authenticatedContext('b', { firebase: { sign_in_provider: 'anonymous' } }).firestore();
+  const unapproved = env.authenticatedContext('unapproved', { firebase: { sign_in_provider: 'anonymous' } }).firestore();
+
+  // 1. Admin creates initial metadata
+  await assertSucceeds(setDoc(doc(adminDb, 'deviceMetadata/a'), {
+    device_name: 'جهاز الرياض 01',
+    rep_name: 'أحمد العتيبي',
+    updated_at: serverTimestamp(),
+    updated_by_uid: 'consoleAdmin',
+    updated_by_email: 'mashhoor.info@gmail.com'
+  }));
+
+  // 2. Approved device 'a' can read its OWN metadata (to display device_name in kiosk)
+  await assertSucceeds(getDoc(doc(phoneA, 'deviceMetadata/a')));
+
+  // 3. Device 'a' CANNOT read device 'b's metadata
+  await assertFails(getDoc(doc(phoneA, 'deviceMetadata/b')));
+
+  // 4. Device 'a' CANNOT list deviceMetadata collection
+  await assertFails(getDocs(collection(phoneA, 'deviceMetadata')));
+
+  // 5. Device 'a' CANNOT write or modify deviceMetadata
+  await assertFails(setDoc(doc(phoneA, 'deviceMetadata/a'), {
+    device_name: 'مخترق',
+    rep_name: 'مخترق',
+    updated_at: serverTimestamp(),
+    updated_by_uid: 'a',
+    updated_by_email: 'a@fake.com'
+  }));
+
+  // 6. Unapproved device CANNOT read deviceMetadata
+  await assertFails(getDoc(doc(unapproved, 'deviceMetadata/unapproved')));
+
+  // 7. Admin archives device
+  await assertSucceeds(setDoc(doc(adminDb, 'deviceMetadata/a'), {
+    device_name: 'جهاز الرياض 01',
+    rep_name: 'أحمد العتيبي',
+    updated_at: serverTimestamp(),
+    updated_by_uid: 'consoleAdmin',
+    updated_by_email: 'mashhoor.info@gmail.com',
+    archived: true,
+    archived_at: serverTimestamp(),
+    archived_by_uid: 'consoleAdmin',
+    archived_by_email: 'mashhoor.info@gmail.com'
+  }));
+
+  // 8. Admin writes audit log for archive_device
+  await assertSucceeds(setDoc(doc(adminDb, 'auditLogs/log_arch_1'), {
+    actor_uid: 'consoleAdmin',
+    actor_email: 'mashhoor.info@gmail.com',
+    target_uid: 'a',
+    action: 'archive_device',
+    summary: 'أرشفة جهاز الرياض 01',
+    before: { archived: false },
+    after: { archived: true },
+    created_at: serverTimestamp()
+  }));
+
+  // 9. Admin restores device
+  await assertSucceeds(setDoc(doc(adminDb, 'deviceMetadata/a'), {
+    device_name: 'جهاز الرياض 01',
+    rep_name: 'أحمد العتيبي',
+    updated_at: serverTimestamp(),
+    updated_by_uid: 'consoleAdmin',
+    updated_by_email: 'mashhoor.info@gmail.com',
+    archived: false,
+    archived_at: null,
+    archived_by_uid: null,
+    archived_by_email: null
+  }));
+
+  // 10. Admin writes audit log for restore_device
+  await assertSucceeds(setDoc(doc(adminDb, 'auditLogs/log_rest_1'), {
+    actor_uid: 'consoleAdmin',
+    actor_email: 'mashhoor.info@gmail.com',
+    target_uid: 'a',
+    action: 'restore_device',
+    summary: 'استعادة جهاز الرياض 01',
+    before: { archived: true },
+    after: { archived: false },
+    created_at: serverTimestamp()
+  }));
+});
+
+
+
+
+test('renaming an archived device retains its archive attribution; forged changes fail',async()=>{
+ const db=env.authenticatedContext('consoleAdmin',{email:'mashhoor.info@gmail.com',email_verified:true,firebase:{sign_in_provider:'password'}}).firestore();
+ const ref=doc(db,'deviceMetadata/a');
+ await assertSucceeds(setDoc(ref,{device_name:'old',rep_name:'rep',updated_at:serverTimestamp(),updated_by_uid:'consoleAdmin',updated_by_email:'mashhoor.info@gmail.com',archived:true,archived_at:serverTimestamp(),archived_by_uid:'consoleAdmin',archived_by_email:'mashhoor.info@gmail.com'}));
+ const before=(await getDoc(ref)).data();
+ await assertSucceeds(setDoc(ref,{device_name:'renamed',rep_name:'rep',updated_at:serverTimestamp(),updated_by_uid:'consoleAdmin',updated_by_email:'mashhoor.info@gmail.com'},{merge:true}));
+ const after=(await getDoc(ref)).data();
+ if(after.archived!==true||!after.archived_at.isEqual(before.archived_at))throw Error('archive was lost');
+ await assertFails(updateDoc(ref,{archived_by_uid:'someone-else',updated_at:serverTimestamp()}));
 });

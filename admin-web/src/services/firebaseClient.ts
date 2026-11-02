@@ -418,7 +418,14 @@ export function translateFirestoreErrorAr(error: unknown): string {
         parsed.error.includes('Missing or insufficient permissions') ||
         parsed.error.includes('permission-denied')
       ) {
-        return `رفضت قواعد Firestore العملية (${parsed.operationType} على ${parsed.path}): الحساب الحالي لا يملك صلاحية مسؤول مثبتة (Custom Claim admin=true أو وثيقة فعالة في admins/{uid}) أو أن قواعد الإدارة المحدثة لم تُنشر بعد في مشروع vansales-mdm.`;
+        return `رفضت قاعدة البيانات العملية (${parsed.operationType} على ${parsed.path}) بسبب الصلاحيات (permission-denied). تحقق من صلاحية حساب المدير الحالي (Custom Claim admin=true أو وثيقة فعالة في admins/{uid}) وإعدادات المشروع وقاعدة البيانات.`;
+      }
+      if (
+        parsed.error.includes('network-request-failed') ||
+        parsed.error.includes('offline') ||
+        parsed.error.includes('unavailable')
+      ) {
+        return `تعذر الاتصال بخادم Firestore أثناء العملية (${parsed.operationType} على ${parsed.path}). تحقق من اتصال الإنترنت وأعد المحاولة.`;
       }
       return `خطأ في Firestore (${parsed.path}): ${parsed.error}`;
     }
@@ -430,7 +437,7 @@ export function translateFirestoreErrorAr(error: unknown): string {
     raw.includes('Missing or insufficient permissions') ||
     raw.includes('permission-denied')
   ) {
-    return 'رفضت قواعد Firestore الوصول (permission-denied). تأكد من توثيق البريد، وإضافة وثيقة admins/{uid} (أو admin claim)، ونشر قواعد Firestore المحدثة في مشروع vansales-mdm.';
+    return 'رفضت قاعدة البيانات الوصول بسبب الصلاحيات (permission-denied). تحقق من توثيق البريد وصلاحية حساب المدير وإعدادات المشروع وقاعدة البيانات.';
   }
   if (raw.includes('Quota exceeded')) {
     return 'تم تجاوز حصة القراءة/الكتابة اليومية المجانية في Firestore. ستُعاد التهيئة في اليوم التالي.';

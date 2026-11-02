@@ -44,8 +44,6 @@ export const PROTECTED_PACKAGES = Object.keys(HARDCODED_PROTECTED_PACKAGES);
  * protect dynamically on the device (keyboards, dialer, home launcher, or preinstalled system apps).
  */
 export const DYNAMICALLY_PROTECTED_ADVISORY_PACKAGES: Record<string, string> = {
-
-
   'com.google.android.inputmethod.latin': 'تنبيه: لوحة مفاتيح Gboard محمية تلقائيًا بواسطة InputMethodManager في الوكيل ولن يُسمح بإخفائها.',
   'com.google.android.dialer': 'تنبيه: تطبيق الهاتف الافتراضي محمي تلقائيًا بواسطة TelecomManager في الوكيل.',
   'com.android.dialer': 'تنبيه: تطبيق الهاتف الافتراضي محمي تلقائيًا بواسطة TelecomManager في الوكيل.',
@@ -396,6 +394,8 @@ export function buildMergedDevices(
       enforcementDetail = `تم التحقق من تطبيق الإصدار ${policy.revision} بنجاح على الجهاز.`;
     }
 
+    const isArchived = metadata?.archived === true;
+
     records.push({
       uid,
       enrollment,
@@ -407,6 +407,7 @@ export function buildMergedDevices(
       enforcementDetail,
       isStaleConnection,
       lastSeenMs,
+      isArchived,
       presentInCollections: {
         enrollments: Boolean(enrollment),
         policies: Boolean(policy),
