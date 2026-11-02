@@ -323,3 +323,11 @@ test('only approved device reports its kiosk execution status', async()=>{
  await assertFails(setDoc(doc(phone,'kioskStatus/a'),{...state,active:'true'}));
  await assertFails(setDoc(doc(env.unauthenticatedContext().firestore(),'kioskStatus/a'),state));
 });
+
+test('package validation rejects separator injection, nonstrings and long names and accepts 50 kiosk apps',async()=>{
+ const db=env.authenticatedContext('consoleAdmin',{email:'mashhoor.info@gmail.com',email_verified:true,firebase:{sign_in_provider:'password'}}).firestore();
+ for(const apps of [['com.valid.app,com.android.settings'],[42],[true],[null],[{package:'com.valid.app'}],['com.'+'a'.repeat(151)],Array.from({length:51},(_,i)=>`com.app.x${i}`)]){
+  await assertFails(setDoc(doc(db,'kioskPolicies/a'),{...kiosk(),allowed_apps:apps}));
+ }
+ await assertSucceeds(setDoc(doc(db,'kioskPolicies/a'),{...kiosk(),allowed_apps:Array.from({length:50},(_,i)=>`com.app.x${i}`)}));
+});

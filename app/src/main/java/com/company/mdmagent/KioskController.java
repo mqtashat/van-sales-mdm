@@ -48,14 +48,15 @@ final class KioskController {
             Set<String> owned=new HashSet<>();for(String r:RESTRICTIONS)if(!d.getUserRestrictions(a).getBoolean(r))owned.add(r);
             requireSave(p.edit().putStringSet("owned_restrictions",owned).putBoolean("managed",true).commit());
         }
+        // Make local password recovery reachable before any OS restriction can fail.
+        if (c.getPackageManager().getComponentEnabledSetting(new ComponentName(c,KioskActivity.class)) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+            c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
         requireSave(p.edit().putStringSet("apps",new HashSet<>(policy.apps)).putBoolean("enabled",true).commit());
         d.setLockTaskPackages(a,list.toArray(new String[0]));
         if(Build.VERSION.SDK_INT>=30)d.setLockTaskFeatures(a,DevicePolicyManager.LOCK_TASK_FEATURE_HOME
                 |DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO|DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
                 |DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS|DevicePolicyManager.LOCK_TASK_FEATURE_BLOCK_ACTIVITY_START_IN_TASK);
         for(String r:RESTRICTIONS)d.addUserRestriction(a,r);
-        if (c.getPackageManager().getComponentEnabledSetting(new ComponentName(c,KioskActivity.class)) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
-            c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
         d.addPersistentPreferredActivity(a,homeFilter(),new ComponentName(c,KioskActivity.class));
         if (!new HashSet<>(Arrays.asList(d.getLockTaskPackages(a))).equals(list)) throw new IllegalStateException("تعذر تأكيد التطبيقات المسموحة");
         for(String r:RESTRICTIONS) if(!d.getUserRestrictions(a).getBoolean(r)) throw new IllegalStateException("تعذر تأكيد قيد شاشة الشركة: "+r);
@@ -69,9 +70,10 @@ final class KioskController {
         if(!p.getBoolean("managed",false))return;
         d.setLockTaskPackages(a,new String[0]); // Removing all packages exits locked tasks on supported Android versions.
         d.clearPackagePersistentPreferredActivities(a,c.getPackageName());
-        c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_DISABLED,PackageManager.DONT_KILL_APP);
         for(String r:p.getStringSet("owned_restrictions",Collections.emptySet()))d.clearUserRestriction(a,r);
         requireSave(p.edit().putBoolean("enabled",false).putBoolean("managed",false).commit());
+        c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_DISABLED,PackageManager.DONT_KILL_APP);
+
         c.sendBroadcast(new Intent("com.company.mdmagent.KIOSK_UPDATED").setPackage(c.getPackageName()));
     }
     static synchronized boolean recover(Context c,char[] password)throws Exception{
