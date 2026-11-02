@@ -121,24 +121,25 @@ public class PolicyTest {
         nm.createNotificationChannel(activeChannel);
         assertTrue(PolicySyncService.isNotificationVisible(app));
 
-        // 3. Mute the service notification channel (IMPORTANCE_NONE) -> false
+        // 3. Disable app-wide notifications while the channel remains enabled.
+        Shadows.shadowOf(nm).setNotificationsEnabled(false);
+        assertFalse(PolicySyncService.isNotificationVisible(app));
+        Shadows.shadowOf(nm).setNotificationsEnabled(true);
+        assertTrue(PolicySyncService.isNotificationVisible(app));
+
+        // 4. Deny and restore runtime permission independently of channel settings.
+        Shadows.shadowOf(app).denyPermissions(Manifest.permission.POST_NOTIFICATIONS);
+        assertFalse(PolicySyncService.isNotificationVisible(app));
+        Shadows.shadowOf(app).grantPermissions(Manifest.permission.POST_NOTIFICATIONS);
+        assertTrue(PolicySyncService.isNotificationVisible(app));
+
+        // 5. Lower channel importance last: recreating a channel cannot raise it again.
         NotificationChannel mutedChannel = new NotificationChannel(
                 PolicySyncService.CHANNEL_ID,
                 "إدارة جهاز الشركة",
                 NotificationManager.IMPORTANCE_NONE
         );
         nm.createNotificationChannel(mutedChannel);
-        assertFalse(PolicySyncService.isNotificationVisible(app));
-
-        // 4. Restore channel importance, but disable app-wide notifications -> false
-        nm.createNotificationChannel(activeChannel);
-        assertTrue(PolicySyncService.isNotificationVisible(app));
-        Shadows.shadowOf(nm).setNotificationsEnabled(false);
-        assertFalse(PolicySyncService.isNotificationVisible(app));
-
-        // 5. Re-enable app-wide notifications, but deny runtime POST_NOTIFICATIONS permission on API 34 -> false
-        Shadows.shadowOf(nm).setNotificationsEnabled(true);
-        Shadows.shadowOf(app).denyPermissions(Manifest.permission.POST_NOTIFICATIONS);
         assertFalse(PolicySyncService.isNotificationVisible(app));
     }
 
@@ -493,7 +494,9 @@ public class PolicyTest {
         ComponentName admin = new ComponentName(app, AdminReceiver.class);
         Shadows.shadowOf(dpm).setDeviceOwner(admin);
         dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_TETHERING);
-        assertTrue(dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING));
+        // Robolectric stores DPM-added restrictions in ShadowUserManager; verify effective restriction.
+        assertTrue(((UserManager) app.getSystemService(Context.USER_SERVICE))
+                .hasUserRestriction(UserManager.DISALLOW_CONFIG_TETHERING));
 
         SharedPreferences prefs = app.getSharedPreferences(SyncEngine.PREFS_NAME, Context.MODE_PRIVATE);
         Set<String> hiddenApps = new HashSet<>(Set.of("com.zhiliaoapp.musically"));
@@ -584,7 +587,9 @@ public class PolicyTest {
             assertNull(Shadows.shadowOf(app).getNextStartedService());
 
             // Applied policy revision, hidden apps, and tethering restriction remain strictly intact
-            assertTrue(dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING));
+            // Robolectric stores DPM-added restrictions in ShadowUserManager; verify effective restriction.
+        assertTrue(((UserManager) app.getSystemService(Context.USER_SERVICE))
+                .hasUserRestriction(UserManager.DISALLOW_CONFIG_TETHERING));
             assertEquals(4L, prefs.getLong(SyncEngine.KEY_REVISION, 0L));
             assertEquals(hiddenApps, prefs.getStringSet("hidden_by_agent", Collections.emptySet()));
         } finally {
