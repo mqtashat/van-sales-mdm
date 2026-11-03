@@ -166,7 +166,14 @@ final class SyncEngine {
 
     private static final ServerEnrollmentProvider DEFAULT_ENROLLMENT_PROVIDER = new ServerEnrollmentProvider() {
         @Override
-        public String getCurrentUid() {
+        static boolean isLocationSwitchEnabled(android.location.LocationManager manager) {
+        if (manager == null) return false;
+        if (android.os.Build.VERSION.SDK_INT >= 28) return manager.isLocationEnabled();
+        return manager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                || manager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+    }
+
+    public String getCurrentUid() {
             FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
             return user != null ? user.getUid() : null;
         }
@@ -605,7 +612,7 @@ final class SyncEngine {
         boolean locPolicyEnabled = LocationPolicy.getLocal(context).enabled;
         state.put("location_policy_enabled", locPolicyEnabled);
         LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
-        boolean locSwitch = lm != null && lm.isLocationEnabled();
+        boolean locSwitch = isLocationSwitchEnabled(lm);
         state.put("location_switch_on", locSwitch);
         state.put("location_service_running", PolicyLocationService.isServiceRunning());
         state.put("applied_revision", applied);
