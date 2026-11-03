@@ -29,6 +29,13 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
+    static boolean isLocationSwitchEnabled(android.location.LocationManager manager) {
+        if (manager == null) return false;
+        if (android.os.Build.VERSION.SDK_INT >= 28) return manager.isLocationEnabled();
+        return manager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
+                || manager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
+    }
+
     static final String TAG = "InjazMdmAgent";
     static final String AGENT_VERSION = "0.5.0-pilot";
     static final String PREFS_NAME = "applied-policy";
@@ -166,14 +173,7 @@ final class SyncEngine {
 
     private static final ServerEnrollmentProvider DEFAULT_ENROLLMENT_PROVIDER = new ServerEnrollmentProvider() {
         @Override
-        static boolean isLocationSwitchEnabled(android.location.LocationManager manager) {
-        if (manager == null) return false;
-        if (android.os.Build.VERSION.SDK_INT >= 28) return manager.isLocationEnabled();
-        return manager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
-                || manager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER);
-    }
-
-    public String getCurrentUid() {
+        public String getCurrentUid() {
             FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
             return user != null ? user.getUid() : null;
         }
