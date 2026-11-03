@@ -87,6 +87,9 @@ public class LocationPolicyTest {
         cal.set(Calendar.HOUR_OF_DAY, 22);
         cal.set(Calendar.MINUTE, 0);
         assertTrue(policy.shouldCollectAt(cal.getTimeInMillis()));
+        assertEquals("21:00", policy.startTime);
+        assertEquals("05:00", policy.endTime);
+        assertEquals(Set.of(Calendar.MONDAY), policy.workDays);
 
         // Tuesday 03:00 -> active (after midnight, yesterday was Monday)
         cal.set(Calendar.DAY_OF_WEEK, Calendar.TUESDAY);
@@ -96,5 +99,10 @@ public class LocationPolicyTest {
         // Tuesday 06:00 -> inactive (shift ended at 05:00)
         cal.set(Calendar.HOUR_OF_DAY, 6);
         assertFalse(policy.shouldCollectAt(cal.getTimeInMillis()));
+        cal.set(Calendar.HOUR_OF_DAY, 22);
+        assertFalse("Tuesday must not start a new shift", policy.shouldCollectAt(cal.getTimeInMillis()));
+        cal.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY);
+        cal.set(Calendar.HOUR_OF_DAY, 3);
+        assertFalse("Sunday did not start a shift", policy.shouldCollectAt(cal.getTimeInMillis()));
     }
 }

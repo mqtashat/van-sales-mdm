@@ -101,6 +101,20 @@ public final class LocationPolicy {
             }
         }
 
+        // Dashboard documents use flat fields. Keep legacy work_hours as fallback.
+        if (data.get("start_time") instanceof String) start = (String) data.get("start_time");
+        if (data.get("end_time") instanceof String) end = (String) data.get("end_time");
+        if (data.get("work_days") instanceof List) {
+            days.clear();
+            for (Object day : (List<?>) data.get("work_days")) {
+                if (!(day instanceof Number) || ((Number) day).doubleValue() != ((Number) day).intValue()
+                        || ((Number) day).intValue() < Calendar.SUNDAY || ((Number) day).intValue() > Calendar.SATURDAY) {
+                    throw new IllegalArgumentException("أيام العمل يجب أن تكون من 1 إلى 7");
+                }
+                days.add(((Number) day).intValue());
+            }
+        }
+
         int interval = 300;
         Object intObj = data.get("sampling_interval_seconds");
         if (intObj instanceof Number) {
@@ -121,9 +135,6 @@ public final class LocationPolicy {
         cal.setTimeInMillis(timestampMs);
 
         int dayOfWeek = cal.get(Calendar.DAY_OF_WEEK);
-        if (!workDays.contains(dayOfWeek)) {
-            return false;
-        }
 
         int currentMinutes = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
         int startMinutes = parseMinutes(startTime);
@@ -131,11 +142,11 @@ public final class LocationPolicy {
 
         if (startMinutes <= endMinutes) {
             // Standard daytime schedule (e.g. 08:00 to 18:00)
-            return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
+            return workDays.contains(dayOfWeek) && currentMinutes >= startMinutes && currentMinutes <= endMinutes;
         } else {
             // Night shift crossing midnight (e.g. 20:00 to 04:00)
             if (currentMinutes >= startMinutes) {
-                return true; // Started today before midnight
+                return workDays.contains(dayOfWeek); // Shift must start on an enabled day
             }
             if (currentMinutes <= endMinutes) {
                 // After midnight; check if yesterday was an active work day
@@ -175,7 +186,7 @@ public final class LocationPolicy {
                 try { days.add(Integer.parseInt(s)); } catch (Exception ignored) {}
             }
         }
-        if (days.isEmpty()) {
+        if (dayStrings == null) {
             days.addAll(Set.of(Calendar.SUNDAY, Calendar.MONDAY, Calendar.TUESDAY, Calendar.WEDNESDAY, Calendar.THURSDAY));
         }
         int interval = p.getInt(KEY_INTERVAL, 300);

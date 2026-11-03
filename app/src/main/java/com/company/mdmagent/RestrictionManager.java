@@ -161,7 +161,7 @@ public final class RestrictionManager {
                     remainingOwned.remove(rem);
                 }
             } catch (Exception ex) {
-                clearErrors.add(rem + ": " + ex.getMessage());
+                clearErrors.add(rem + ": " + ex.getClass().getSimpleName() + (ex.getMessage() == null ? "" : ": " + ex.getMessage()));
             }
         }
         requireSave(p.edit().putStringSet(KEY_OWNED_RESTRICTIONS, remainingOwned).commit());

@@ -16,7 +16,7 @@ import javax.crypto.spec.PBEKeySpec;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest=Config.NONE, sdk=34)
+@Config(manifest=Config.NONE, sdk=34, shadows=KioskResumeTest.RestrictionsShadow.class)
 public class DeprovisionTest {
 
     private String toHex(byte[] bytes) {
@@ -46,9 +46,16 @@ public class DeprovisionTest {
         boolean okWrong = DeprovisionController.verifyPasscode(c, "WrongPass123!".toCharArray());
         assertFalse(okWrong);
 
-        // Correct passcode succeeds
+        // Even a correct passcode is rejected until the persisted cooldown expires.
+        assertThrows(IllegalStateException.class, () ->
+                DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray()));
+        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+
+        // Correct passcode succeeds after cooldown and resets the failure counter.
         boolean okRight = DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray());
         assertTrue(okRight);
+        assertEquals(0, DeprovisionController.prefs(c).getInt(DeprovisionController.KEY_FAILURES, -1));
+        assertEquals(0L, DeprovisionController.prefs(c).getLong(DeprovisionController.KEY_RETRY_AFTER, -1));
     }
 
     @Test

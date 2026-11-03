@@ -41,7 +41,7 @@ public class KioskResumeTest {
         Shadows.shadowOf(c.getPackageManager()).addResolveInfoForIntent(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(pkg),resolve);
         assertNotNull("Fixture must register an installed launcher app",c.getPackageManager().getLaunchIntentForPackage(pkg));
     }
-    @After public void cleanup(){KioskController.clearHookForTest=null;}
+    @After public void cleanup(){RestrictionManager.clearHookForTest=null;}
     KioskPolicy policy(long rev,boolean enabled){return new KioskPolicy(rev,enabled,Set.of(pkg),"a".repeat(32),"b".repeat(64));}
     void legacyMaintenance(){
         KioskController.prefs(c).edit().putLong("accepted_revision",7).putLong("configured_revision",7)
@@ -86,12 +86,12 @@ public class KioskResumeTest {
     @Test public void partialReleaseKeepsFailedRestrictionAndRetriesWithoutFalseSuccess()throws Exception{
         KioskController.apply(c,policy(7,true));
         KioskController.prefs(c).edit().putLong("configured_revision",7).commit();
-        KioskController.clearHookForTest=r->{if(r.equals(UserManager.DISALLOW_SAFE_BOOT))throw new SecurityException();};
+        RestrictionManager.clearHookForTest=r->{if(r.equals(UserManager.DISALLOW_SAFE_BOOT))throw new SecurityException();};
         assertThrows(IllegalStateException.class,()->KioskController.apply(c,policy(8,false)));
         assertEquals(7,KioskController.prefs(c).getLong("configured_revision",0));
         assertEquals(Set.of(UserManager.DISALLOW_SAFE_BOOT),KioskController.prefs(c).getStringSet("owned_restrictions",Set.of()));
         assertTrue(KioskController.prefs(c).getString("last_error","").contains("SecurityException"));
-        KioskController.clearHookForTest=null;KioskController.apply(c,policy(8,false));
+        RestrictionManager.clearHookForTest=null;KioskController.apply(c,policy(8,false));
         assertEquals(8,KioskController.prefs(c).getLong("configured_revision",0));
         assertEquals("",KioskController.prefs(c).getString("last_error",""));
         assertTrue(KioskController.prefs(c).getStringSet("owned_restrictions",Set.of()).isEmpty());
