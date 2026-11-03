@@ -16,8 +16,20 @@ import javax.crypto.spec.PBEKeySpec;
 import static org.junit.Assert.*;
 
 @RunWith(RobolectricTestRunner.class)
-@Config(manifest=Config.NONE, sdk=34, shadows=KioskResumeTest.RestrictionsShadow.class)
+@Config(manifest=Config.NONE, sdk=34, shadows=DeprovisionTest.DeprovisionShadow.class)
 public class DeprovisionTest {
+    // Robolectric 4.14.1 has no clearDeviceOwnerApp implementation. Model that OS call
+    // while exercising the controller's actual restriction cleanup and production guard.
+    @org.robolectric.annotation.Implements(DevicePolicyManager.class)
+    public static class DeprovisionShadow extends KioskResumeTest.RestrictionsShadow {
+        boolean ownerClearCalled;
+        @org.robolectric.annotation.Implementation
+        protected void clearDeviceOwnerApp(String packageName) {
+            assertTrue(isDeviceOwnerApp(packageName));
+            ownerClearCalled = true;
+            setDeviceOwner(null);
+        }
+    }
 
     private String toHex(byte[] bytes) {
         StringBuilder sb = new StringBuilder();
@@ -42,17 +54,18 @@ public class DeprovisionTest {
 
         DeprovisionController.savePasscodeCredentials(c, saltHex, correctHash);
 
+        long now = 10_000L;
         // Wrong passcode fails
-        boolean okWrong = DeprovisionController.verifyPasscode(c, "WrongPass123!".toCharArray());
+        boolean okWrong = DeprovisionController.verifyPasscode(c, "WrongPass123!".toCharArray(), now);
         assertFalse(okWrong);
 
         // Even a correct passcode is rejected until the persisted cooldown expires.
         assertThrows(IllegalStateException.class, () ->
-                DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray()));
-        org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(3));
+                DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray(), now + 1999));
+        assertEquals(now + 2000, DeprovisionController.prefs(c).getLong(DeprovisionController.KEY_RETRY_AFTER, 0));
 
         // Correct passcode succeeds after cooldown and resets the failure counter.
-        boolean okRight = DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray());
+        boolean okRight = DeprovisionController.verifyPasscode(c, "SecretPass123!".toCharArray(), now + 2000);
         assertTrue(okRight);
         assertEquals(0, DeprovisionController.prefs(c).getInt(DeprovisionController.KEY_FAILURES, -1));
         assertEquals(0L, DeprovisionController.prefs(c).getLong(DeprovisionController.KEY_RETRY_AFTER, -1));
@@ -91,6 +104,7 @@ public class DeprovisionTest {
         // Pre-existing restriction untouched
         assertTrue(dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_SAFE_BOOT));
         // Device Owner relinquished
+        assertTrue(((DeprovisionShadow) org.robolectric.shadow.api.Shadow.extract(dpm)).ownerClearCalled);
         assertFalse(dpm.isDeviceOwnerApp(c.getPackageName()));
     }
 }

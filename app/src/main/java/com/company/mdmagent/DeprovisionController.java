@@ -47,8 +47,12 @@ public final class DeprovisionController {
     }
 
     public static boolean verifyPasscode(Context context, char[] passcode) throws Exception {
+        return verifyPasscode(context, passcode, System.currentTimeMillis());
+    }
+
+    // Explicit time keeps cooldown tests deterministic; public calls always use the wall clock.
+    static boolean verifyPasscode(Context context, char[] passcode, long now) throws Exception {
         SharedPreferences p = prefs(context);
-        long now = System.currentTimeMillis();
         long retryAfter = p.getLong(KEY_RETRY_AFTER, 0L);
         if (now < retryAfter) {
             long remainingSec = (retryAfter - now) / 1000L;
