@@ -6,6 +6,7 @@ import {
 } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
+import { getStorage, type FirebaseStorage } from 'firebase/storage';
 import {
   TARGET_FIREBASE_PROJECT_ID,
   TARGET_FIRESTORE_DATABASE_ID,
@@ -195,6 +196,7 @@ let cachedServices: {
   app: FirebaseApp;
   auth: Auth;
   db: Firestore;
+  storage: FirebaseStorage;
   fingerprint: string;
 } | null = null;
 
@@ -333,6 +335,7 @@ export function getFirebaseServices(): {
   app: FirebaseApp;
   auth: Auth;
   db: Firestore;
+  storage: FirebaseStorage;
 } | null {
   const resolution = resolveFirebaseConfig();
   if (!resolution.isConfigured || !resolution.config) {
@@ -348,6 +351,7 @@ export function getFirebaseServices(): {
       app: cachedServices.app,
       auth: cachedServices.auth,
       db: cachedServices.db,
+      storage: cachedServices.storage,
     };
   }
 
@@ -374,9 +378,10 @@ export function getFirebaseServices(): {
   const auth = getAuth(app);
   // Target the (default) Firestore database on vansales-mdm
   const db = getFirestore(app);
+  const storage = getStorage(app);
 
-  cachedServices = { app, auth, db, fingerprint };
-  return { app, auth, db };
+  cachedServices = { app, auth, db, storage, fingerprint };
+  return { app, auth, db, storage };
 }
 
 export function handleFirestoreError(

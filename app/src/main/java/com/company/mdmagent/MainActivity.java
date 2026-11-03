@@ -9,6 +9,9 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.app.AlertDialog;
+import android.widget.EditText;
+import android.text.InputType;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -51,8 +54,8 @@ public class MainActivity extends Activity {
 
         TextView description = new TextView(this);
         description.setText(
-                "نسخة اختبار لجهاز واحد (0.4.1-pilot): منع مشاركة الإنترنت وإخفاء التطبيقات التي تحددها الإدارة، بما فيها التطبيقات المثبتة مسبقًا غير الأساسية. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات ولا يلغي إشراف Family Link. تعذر حظر تطبيق لا يوقف تنفيذ بقية السياسة.\n\n"
-                + "ترسل: نوع الجهاز، إصدار أندرويد، البطارية، حالة الصلاحية والسياسة ووقت المزامنة. لا تجمع موقعًا أو صورًا أو جهات اتصال.\n"
+                "نسخة إدارة أجهزة الشركة (0.5.0-pilot): منع مشاركة الإنترنت، والتحكم بتثبيت التطبيقات وإخفاء التطبيقات المحددة، وحماية شاشة الشركة. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات.\n\n"
+                + "البيانات المرسلة: نوع الجهاز، إصدار أندرويد، نسبة البطارية، حالة السياسات والقيود، وجرد التطبيقات. عند تفعيل الإدارة لسياسة تتبع الموقع، تجمع الخدمة الأمامية المعلنة إحداثيات موقع الجهاز لغايات العمل وساعات الدوام بإشعار مستمر؛ ولا تجمع جهات اتصال أو صورًا شخصية.\n"
         );
         box.addView(description);
 
@@ -125,6 +128,24 @@ public class MainActivity extends Activity {
                 });
                 KioskController.queueStatus(getApplicationContext());
             });
+        });
+
+        Button deprovisionBtn = new Button(this);
+        deprovisionBtn.setText("حالة إدارة مسؤول الجهاز (Device Owner)");
+        box.addView(deprovisionBtn);
+        deprovisionBtn.setOnClickListener(v -> {
+            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+            boolean isOwner = dpm != null && dpm.isDeviceOwnerApp(getPackageName());
+            new AlertDialog.Builder(this)
+                    .setTitle("إدارة مسؤول الجهاز (Device Owner)")
+                    .setMessage(isOwner
+                            ? "الجهاز مسجل كمسؤول جهاز معتمد (Device Owner).\n\n"
+                            + "تنبيه الأمان والامتثال:\n"
+                            + "وفق توثيق Android Enterprise الرسمي، لا يدعم النظام إنهاء إدارة الجهاز المدار بالكامل دون إعادة ضبط المصنع ومسح البيانات. لحماية بيانات وسجلات المبيعات من الفقدان، فإن استخدام دوال الاختبار التجريبية (clearDeviceOwnerApp) معطل في الإنتاج.\n\n"
+                            + "لإجراء تعديلات أو صيانة مؤقتة دون مسح البيانات، يُرجى استخدام «وضع الصيانة» المعتمد من شاشة الشركة، أو أرشفة الجهاز من لوحة الإدارة."
+                            : "الجهاز غير مسجل حالياً كمسؤول جهاز (Device Owner).")
+                    .setPositiveButton("حسناً", null)
+                    .show();
         });
 
         status = new TextView(this);

@@ -81,10 +81,30 @@ Force-stop, offline devices, and OEM power restrictions can still prevent immedi
 
 ## Test before fleet rollout
 
-- Confirm 0.3.0-pilot, same UID, owner active, notifications allowed, registration successful.
+- Confirm 0.5.0-pilot, same UID, owner active, notifications allowed, registration successful.
 - Close UI, unplug USB, lock screen; save both allow and block policies and record ack delay.
 - Restart; unlock once without opening agent; change policy and verify applied_revision.
 - Disconnect all internet; change policy; reconnect and verify latest policy catches up.
 - Repeat after at least 30–60 minutes idle unplugged; check actual hotspot restriction.
 - Verify token rotation/re-approval and backend logs; monitor battery/data over a workday.
 - Tests/CI prove code paths and build/signature, not OEM physical-device reliability.
+
+## Server-side APK Inspection & Isolated Cloud Run Container Runtime
+
+Cryptographic APK verification (`v1`/`v2`/`v3`) and binary `AndroidManifest.xml` extraction are executed exclusively on the server using the official Android `apksigner` tool (`functions/bin/apksigner.jar`).
+
+1. **Delivery Artifact Completeness**:
+   - The `injaz-mdm-push-server` artifact includes `functions/bin/apksigner.jar`, `functions/Dockerfile`, and `functions/cloudRunInspectorServer.js`, alongside all Cloud Functions triggers (`registerMdmPush`, `inspectCompanyApk`, `getTaskDownloadAuthorization`, `mdmPolicyChanged`, `mdmEnrollmentChanged`, `mdmPushRegistered`, `mdmKioskChanged`, `cleanupOldLocationPoints`, `onCommandCompletedKioskSync`, `onInventoryUpdatedKioskSync`).
+2. **Isolated Cloud Run Container Option (Guaranteed JRE + `apksigner.jar`)**:
+   - Because standard managed Cloud Functions Node buildpacks may not guarantee a system `java` binary in every environment, `functions/Dockerfile` and `functions/cloudRunInspectorServer.js` provide a self-contained Cloud Run container bundling Node.js 22 + OpenJDK 17 Headless JRE + `functions/bin/apksigner.jar`.
+   - Deploy from the extracted `injaz-mdm-push-server` artifact directory when ready (do NOT run automatically in CI/dev):
+     ```sh
+     gcloud run deploy injaz-apk-inspector \
+       --source functions \
+       --region us-central1 \
+       --project vansales-mdm \
+       --max-instances=2 \
+       --memory=512Mi
+     ```
+   - The service requires a verified Firebase Auth ID token (`Authorization: Bearer <token>`), enforces `verifyAdminAuth` (verified email + `admin === true` or `/admins/{uid}.active === true`), binds the verified status to the exact Storage path, object `generation`, and `sha256_apk`, and fails closed (`inspection_status: 'pending_inspection'`, `inspected_by_server: false`) if the inspection runtime is unavailable—never falling back to heuristic or client-side approval.
+

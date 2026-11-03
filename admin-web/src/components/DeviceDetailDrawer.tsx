@@ -35,6 +35,11 @@ import {
   setDeviceApproval,
   saveDevicePolicyTransaction,
   setDeviceArchivedStatus,
+  subscribeToAppInstallPolicy,
+  saveAppInstallPolicy,
+  subscribeToLocationPolicy,
+  saveLocationPolicy,
+  deprovisionDevice,
 } from '../services/mdmService';
 import { KioskPanel } from './KioskPanel';
 import {
@@ -58,9 +63,20 @@ import {
   AlertTriangle,
   Archive,
   ArchiveRestore,
+  Navigation,
+  MapPin,
+  UserX,
 } from 'lucide-react';
 
-export type DeviceManagementTabId = 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history';
+export type DeviceManagementTabId =
+  | 'overview'
+  | 'apps'
+  | 'kiosk'
+  | 'tethering'
+  | 'install_policy'
+  | 'location'
+  | 'actions'
+  | 'history';
 
 interface DeviceDetailDrawerProps {
   device: MergedDeviceRecord | null;
@@ -196,6 +212,46 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
       },
     });
     return () => unsub();
+  }, [device?.uid, db]);
+
+  // Independent Install Policy state
+  const [installPolicyBlock, setInstallPolicyBlock] = useState(false);
+  const [savingInstallPolicy, setSavingInstallPolicy] = useState(false);
+  const [installPolicyNotice, setInstallPolicyNotice] = useState<string | null>(null);
+
+  // Independent Location Policy state
+  const [locationPolicyEnabled, setLocationPolicyEnabled] = useState(false);
+  const [locationPolicyMode, setLocationPolicyMode] = useState<'continuous' | 'work_hours'>('continuous');
+  const [locationStartTime, setLocationStartTime] = useState('08:00');
+  const [locationEndTime, setLocationEndTime] = useState('18:00');
+  const [locationInterval, setLocationInterval] = useState(300);
+  const [savingLocationPolicy, setSavingLocationPolicy] = useState(false);
+  const [locationPolicyNotice, setLocationPolicyNotice] = useState<string | null>(null);
+
+  // Authorized Deprovisioning state
+  const [deprovisionReason, setDeprovisionReason] = useState('');
+  const [deprovisionConfirmName, setDeprovisionConfirmName] = useState('');
+  const [savingDeprovision, setSavingDeprovision] = useState(false);
+  const [deprovisionNotice, setDeprovisionNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!device?.uid || !db) return;
+    const unsubInstall = subscribeToAppInstallPolicy(db, device.uid, (p) => {
+      if (p) setInstallPolicyBlock(p.block_app_installs);
+    });
+    const unsubLoc = subscribeToLocationPolicy(db, device.uid, (p) => {
+      if (p) {
+        setLocationPolicyEnabled(p.enabled);
+        setLocationPolicyMode(p.mode);
+        setLocationStartTime(p.start_time);
+        setLocationEndTime(p.end_time);
+        setLocationInterval(p.sampling_interval_seconds);
+      }
+    });
+    return () => {
+      unsubInstall();
+      unsubLoc();
+    };
   }, [device?.uid, db]);
 
   // Sync local state when switching to a different device UID
@@ -696,6 +752,23 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
       icon: <WifiOff className="w-4 h-4" />,
     },
     {
+      id: 'install_policy',
+      label: 'منع التثبيت',
+      badge: installPolicyBlock ? 'ممنوع' : 'مسموح',
+      icon: <Lock className="w-4 h-4" />,
+    },
+    {
+      id: 'location',
+      label: 'الموقع والتتبع',
+      badge: locationPolicyEnabled ? 'مفعّل' : undefined,
+      icon: <Navigation className="w-4 h-4" />,
+    },
+    {
+      id: 'actions',
+      label: 'إنهاء الإدارة',
+      icon: <UserX className="w-4 h-4" />,
+    },
+    {
       id: 'history',
       label: 'سجل الجهاز',
       badge: deviceLogs.length,
@@ -916,6 +989,18 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
                   {device.status?.applied_revision !== undefined && device.status.applied_revision > 0
                     ? `الإصدار ${device.status.applied_revision}`
                     : 'لم يطبق بعد'}
+                </span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">حماية مسؤول الجهاز (Device Owner)</span>
+                <span className={`text-sm font-bold mt-1 ${device.status?.device_owner ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  {device.status?.device_owner ? 'مفعّل ومحمي من الإزالة' : 'غير مفعّل'}
+                </span>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                <span className="text-xs font-semibold text-slate-500">منع التثبيت وتتبع الموقع</span>
+                <span className="text-xs font-bold text-slate-800 mt-1">
+                  تثبيت: {device.status?.block_app_installs ? 'محظور' : 'مسموح'} • موقع: {device.status?.location_policy_enabled ? 'مفعّل' : 'معطل'}
                 </span>
               </div>
             </div>
@@ -1707,6 +1792,312 @@ export const DeviceDetailDrawer: React.FC<DeviceDetailDrawerProps> = ({
             >
               <Save className="w-4 h-4" />
               <span>{savingPolicy ? 'جارٍ الحفظ...' : 'حفظ إعدادات مشاركة الإنترنت'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: INSTALL POLICY (منع التثبيت المستقل) */}
+      {activeTab === 'install_policy' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">سياسة منع تثبيت التطبيقات المستقلة</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                تمنع تثبيت أي تطبيقات جديدة يدويًا من متجر Google Play أو عبر ملفات APK غير المعتمدة، بصورة مستقلة تمامًا عن شاشة الشركة.
+              </p>
+            </div>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold ${
+                installPolicyBlock
+                  ? 'bg-rose-100 text-rose-800'
+                  : 'bg-emerald-100 text-emerald-800'
+              }`}
+            >
+              {installPolicyBlock ? 'التثبيت ممنوع على الجهاز' : 'التثبيت مسموح'}
+            </span>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 space-y-2">
+            <div className="font-bold text-slate-900">ضمانات سياسة التثبيت:</div>
+            <ul className="list-disc list-inside space-y-1 text-slate-600">
+              <li>تطبيق قيدي <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono">DISALLOW_INSTALL_APPS</code> و <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono">DISALLOW_INSTALL_UNKNOWN_SOURCES</code> عبر Device Policy Manager.</li>
+              <li>تبقى السياسة نافذة حتى لو تم تفعيل وضع الصيانة لشاشة الشركة أو إيقاف شاشة الشركة كليًا.</li>
+              <li>يُسمح بتثبيت التطبيقات المعتمدة فقط عبر لوحة التحكم من قسم «تطبيقات الشركة».</li>
+            </ul>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-xl">
+            <div>
+              <div className="font-bold text-sm text-slate-800">تفعيل منع تثبيت التطبيقات</div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                حظر تثبيت المستخدم لأي تطبيقات جديدة على هذا الهاتف
+              </p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={installPolicyBlock}
+                onChange={(e) => setInstallPolicyBlock(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          {installPolicyNotice && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+              {installPolicyNotice}
+            </div>
+          )}
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="button"
+              disabled={savingInstallPolicy}
+              onClick={async () => {
+                if (!device) return;
+                setSavingInstallPolicy(true);
+                setInstallPolicyNotice(null);
+                try {
+                  const rev = await saveAppInstallPolicy(db, device.uid, installPolicyBlock, actor);
+                  setInstallPolicyNotice(`تم حفظ سياسة التثبيت بنجاح (الإصدار v${rev}) بانتظار مزامنة وتأكيد الهاتف.`);
+                } catch (err) {
+                  alert('فشل حفظ سياسة التثبيت: ' + (err instanceof Error ? err.message : String(err)));
+                } finally {
+                  setSavingInstallPolicy(false);
+                }
+              }}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+            >
+              <Save className="w-4 h-4" />
+              <span>{savingInstallPolicy ? 'جارٍ الحفظ...' : 'حفظ سياسة التثبيت'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: LOCATION POLICY (سياسة الموقع والتتبع) */}
+      {activeTab === 'location' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-5">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">سياسة وتتبع موقع الجهاز</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                تفعيل تتبع الموقع لغايات العمل وساعات الدوام بإشعار مستمر في هاتف المندوب، مع حفظ الإحداثيات محليًا عند انقطاع الإنترنت.
+              </p>
+            </div>
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-bold ${
+                locationPolicyEnabled
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : 'bg-slate-100 text-slate-700'
+              }`}
+            >
+              {locationPolicyEnabled ? 'التتبع مفعّل' : 'التتبع معطّل'}
+            </span>
+          </div>
+
+          {/* Telemetry Status Bar */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-xs text-slate-500 block">حالة الخدمة الأمامية بالجهاز:</span>
+              <strong className="text-sm text-slate-800">
+                {device.status?.location_service_running ? '🟢 نشطة وتجمع الإحداثيات' : '⚪ متوقفة'}
+              </strong>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-xs text-slate-500 block">مفتاح الموقع في النظام (GPS):</span>
+              <strong className="text-sm text-slate-800">
+                {device.status?.location_switch_on ? '🟢 مشغّل إجباريًا' : '🟡 مغلق بالنظام'}
+              </strong>
+            </div>
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <span className="text-xs text-slate-500 block">حظر تعديل الموقع من المستخدم:</span>
+              <strong className="text-sm text-slate-800">
+                {locationPolicyEnabled ? '🔒 مقفل (DISALLOW_CONFIG_LOCATION)' : '🔓 مسموح للمستخدم'}
+              </strong>
+            </div>
+          </div>
+
+          <div className="space-y-4 pt-2">
+            <div className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-xl">
+              <div>
+                <div className="font-bold text-sm text-slate-800">تشغيل تتبع موقع هذا الجهاز</div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  تفعيل الخدمة الأمامية وتأمين صلاحيات الموقع تلقائيًا
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={locationPolicyEnabled}
+                  onChange={(e) => setLocationPolicyEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {locationPolicyEnabled && (
+              <div className="space-y-4 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">نمط التتبع</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="loc_mode"
+                        value="continuous"
+                        checked={locationPolicyMode === 'continuous'}
+                        onChange={() => setLocationPolicyMode('continuous')}
+                        className="text-blue-600"
+                      />
+                      <span>تتبع مستمر طوال اليوم</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="loc_mode"
+                        value="work_hours"
+                        checked={locationPolicyMode === 'work_hours'}
+                        onChange={() => setLocationPolicyMode('work_hours')}
+                        className="text-blue-600"
+                      />
+                      <span>ساعات العمل المحددة فقط</span>
+                    </label>
+                  </div>
+                </div>
+
+                {locationPolicyMode === 'work_hours' && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">وقت البدء (صيغة 24 ساعة)</label>
+                      <input
+                        type="time"
+                        value={locationStartTime}
+                        onChange={(e) => setLocationStartTime(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">وقت الانتهاء (صيغة 24 ساعة)</label>
+                      <input
+                        type="time"
+                        value={locationEndTime}
+                        onChange={(e) => setLocationEndTime(e.target.value)}
+                        className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">معدل أخذ العينات</label>
+                  <select
+                    value={locationInterval}
+                    onChange={(e) => setLocationInterval(Number(e.target.value))}
+                    className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg bg-white"
+                  >
+                    <option value={60}>كل دقيقة (دقة عالية، استهلاك بطارية أعلى)</option>
+                    <option value={120}>كل دقيقتين (موصى به للمبيعات)</option>
+                    <option value={300}>كل 5 دقائق (متوازن)</option>
+                    <option value={600}>كل 10 دقائق (توفير طاقة)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {locationPolicyNotice && (
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+              {locationPolicyNotice}
+            </div>
+          )}
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="button"
+              disabled={savingLocationPolicy}
+              onClick={async () => {
+                if (!device) return;
+                setSavingLocationPolicy(true);
+                setLocationPolicyNotice(null);
+                try {
+                  const rev = await saveLocationPolicy(
+                    db,
+                    device.uid,
+                    {
+                      enabled: locationPolicyEnabled,
+                      mode: locationPolicyMode,
+                      start_time: locationStartTime,
+                      end_time: locationEndTime,
+                      work_days: [1, 2, 3, 4, 5],
+                      sampling_interval_seconds: locationInterval,
+                    },
+                    actor
+                  );
+                  setLocationPolicyNotice(`تم حفظ سياسة الموقع بنجاح (الإصدار v${rev}) بانتظار مزامنة وتأكيد الهاتف.`);
+                } catch (err) {
+                  alert('فشل حفظ سياسة الموقع: ' + (err instanceof Error ? err.message : String(err)));
+                } finally {
+                  setSavingLocationPolicy(false);
+                }
+              }}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-xs cursor-pointer"
+            >
+              <Save className="w-4 h-4" />
+              <span>{savingLocationPolicy ? 'جارٍ الحفظ...' : 'حفظ سياسة الموقع'}</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: ACTIONS / DEPROVISIONING (إنهاء الإدارة المصرّح) */}
+      {activeTab === 'actions' && (
+        <div className="bg-white border border-rose-200 rounded-xl p-5 shadow-xs space-y-5">
+          <div className="flex items-center justify-between border-b border-rose-100 pb-3">
+            <div className="flex items-center gap-2 text-rose-800">
+              <UserX className="w-5 h-5 text-rose-600" />
+              <div>
+                <h3 className="text-base font-bold text-rose-950">إنهاء إدارة الجهاز المصرّح (Deprovisioning)</h3>
+                <p className="text-xs text-rose-600 mt-0.5">
+                  إلغاء صلاحية مسؤوليّة الجهاز (Device Owner) وإزالة قيود الشركة دون حذف بيانات الجهاز أو إعادة ضبط المصنع.
+                </p>
+              </div>
+            </div>
+            {device.status?.deprovisioned && (
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-800">
+                تم إنهاء الإدارة سابقًا
+              </span>
+            )}
+          </div>
+
+          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-950 space-y-3 leading-relaxed">
+            <div className="font-bold flex items-center gap-2 text-amber-900">
+              <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+              <span>إشعار الامتثال لمعايير Android Enterprise:</span>
+            </div>
+            <p>
+              تحدد وثائق Google الرسمية لنظام Android Enterprise أن صلاحية مسؤول الجهاز (Device Owner) دائمة ومحمية، وأن إجراء <code className="bg-white px-1.5 py-0.5 rounded font-mono text-amber-900 border border-amber-200">clearDeviceOwnerApp()</code> مصنف كـ <code className="bg-white px-1.5 py-0.5 rounded font-mono text-amber-900 border border-amber-200">@TestApi</code> للاختبارات المعملية فقط، ولا يُسمح بإلغائه في بيئات الإنتاج إلا عبر إعادة ضبط المصنع الكاملة (<code className="bg-white px-1.5 py-0.5 rounded font-mono text-amber-900 border border-amber-200">wipeData</code>).
+            </p>
+            <p className="font-medium text-amber-900">
+              لحماية بيانات الشركة والمستخدمين من المسح القسري، تم تعطيل هذا الإجراء في بيئة الإنتاج. يُرجى اعتماد البدائل الرسمية الآتية:
+            </p>
+            <ul className="list-disc list-inside space-y-1 text-amber-900">
+              <li><strong>وضع الصيانة (Maintenance Mode):</strong> لتحرير الشاشة وفتح إعدادات الهاتف المؤقتة للصيانة دون فقدان الإدارة أو البيانات.</li>
+              <li><strong>أرشفة الجهاز (Archiving):</strong> لعزل الجهاز وإيقاف تشغيله الميداني مع الاحتفاظ بسجلاته والتدقيق التاريخي.</li>
+            </ul>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center justify-between">
+            <span className="font-medium">حالة الإجراء في الإنتاج: معطّل التزاماً ببروتوكولات الأمان الرسمية لنظام أندرويد</span>
+            <button
+              type="button"
+              disabled={true}
+              className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-200 text-slate-500 cursor-not-allowed"
+            >
+              إنهاء الإدارة معطّل بالإنتاج
             </button>
           </div>
         </div>

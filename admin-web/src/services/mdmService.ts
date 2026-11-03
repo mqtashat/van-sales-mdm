@@ -1,13 +1,18 @@
 import {
+  addDoc,
   collection,
   doc,
   getDocFromServer,
+  getDocs,
   limit,
   onSnapshot,
   orderBy,
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
+  updateDoc,
+  writeBatch,
   type Firestore,
   type Unsubscribe,
 } from 'firebase/firestore';
@@ -20,14 +25,19 @@ import {
   MDM_AGENT_PACKAGE_NAME,
   type AdminDocCheckStatus,
   type AdminIdentity,
+  type AppInstallPolicyDoc,
   type AuditActionType,
   type AuditLogDoc,
   type BulkActionPlanItem,
   type BulkDeviceExecutionResult,
+  type CompanyAppDoc,
   type DeviceAppInventoryDoc,
+  type DeviceLocationPoint,
   type DeviceMetadataDoc,
   type DeviceStatusDoc,
   type EnrollmentDoc,
+  type InstallRequestDoc,
+  type LocationPolicyDoc,
   type PolicyDoc,
 } from '../types/mdm.ts';
 import {
@@ -570,7 +580,7 @@ export async function saveDeviceMetadata(
         updated_at: serverTimestamp(),
         updated_by_uid: actor.uid,
         updated_by_email: actor.email,
-      }, { merge: true });
+      });
 
       tx.set(auditRef, {
         actor_uid: actor.uid,
@@ -973,4 +983,841 @@ export async function executeBulkDeviceAction(
 
   return results;
 }
+
+export function subscribeToAppInstallPolicy(
+  db: Firestore,
+  uid: string,
+  callback: (policy: AppInstallPolicyDoc | null) => void,
+  options?: { onError?: (err: Error) => void }
+): Unsubscribe {
+  const policyRef = doc(db, 'appInstallPolicies', uid);
+  return onSnapshot(
+    policyRef,
+    (snap) => {
+      if (!snap.exists()) {
+        callback(null);
+        return;
+      }
+      const data = snap.data();
+      callback({
+        schema_version: Number(data.schema_version || 1),
+        revision: Number(data.revision || 1),
+        block_app_installs: Boolean(data.block_app_installs),
+        updated_at: data.updated_at || null,
+        updated_by_uid: data.updated_by_uid || '',
+        updated_by_email: data.updated_by_email || '',
+      });
+    },
+    (err) => {
+      if (options?.onError) {
+        options.onError(err);
+      }
+      callback(null);
+    }
+  );
+}
+
+export async function saveAppInstallPolicy(
+  db: Firestore,
+  uid: string,
+  blockAppInstalls: boolean,
+  actor: { uid: string; email: string }
+): Promise<number> {
+  const policyRef = doc(db, 'appInstallPolicies', uid);
+  const auditRef = doc(collection(db, 'auditLogs'));
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(policyRef);
+    let nextRevision = 1;
+    let beforeData: Record<string, unknown> = {};
+
+    if (snap.exists()) {
+      const data = snap.data();
+      nextRevision = Number(data.revision || 0) + 1;
+      beforeData = data;
+    }
+
+    const nextDoc: AppInstallPolicyDoc = {
+      schema_version: 1,
+      revision: nextRevision,
+      block_app_installs: blockAppInstalls,
+      updated_at: serverTimestamp() as any,
+      updated_by_uid: actor.uid,
+      updated_by_email: actor.email,
+    };
+
+    tx.set(policyRef, nextDoc);
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'update_install_policy',
+      summary: blockAppInstalls
+        ? `تفعيل سياسة منع تثبيت التطبيقات (الإصدار v${nextRevision})`
+        : `إلغاء سياسة منع تثبيت التطبيقات (الإصدار v${nextRevision})`,
+      before: beforeData,
+      after: {
+        schema_version: 1,
+        revision: nextRevision,
+        block_app_installs: blockAppInstalls,
+      },
+      created_at: serverTimestamp(),
+    });
+
+    return nextRevision;
+  });
+}
+
+export function subscribeToLocationPolicy(
+  db: Firestore,
+  uid: string,
+  callback: (policy: LocationPolicyDoc | null) => void,
+  options?: { onError?: (err: Error) => void }
+): Unsubscribe {
+  const policyRef = doc(db, 'locationPolicies', uid);
+  return onSnapshot(
+    policyRef,
+    (snap) => {
+      if (!snap.exists()) {
+        callback(null);
+        return;
+      }
+      const data = snap.data();
+      callback({
+        schema_version: Number(data.schema_version || 1),
+        revision: Number(data.revision || 1),
+        enabled: Boolean(data.enabled),
+        mode: data.mode === 'work_hours' ? 'work_hours' : 'continuous',
+        start_time: data.start_time || '08:00',
+        end_time: data.end_time || '18:00',
+        work_days: Array.isArray(data.work_days) ? data.work_days : [1, 2, 3, 4, 5],
+        sampling_interval_seconds: Number(data.sampling_interval_seconds || 300),
+        updated_at: data.updated_at || null,
+        updated_by_uid: data.updated_by_uid || '',
+        updated_by_email: data.updated_by_email || '',
+      });
+    },
+    (err) => {
+      if (options?.onError) {
+        options.onError(err);
+      }
+      callback(null);
+    }
+  );
+}
+
+export async function saveLocationPolicy(
+  db: Firestore,
+  uid: string,
+  policy: Omit<LocationPolicyDoc, 'schema_version' | 'revision'>,
+  actor: { uid: string; email: string }
+): Promise<number> {
+  const policyRef = doc(db, 'locationPolicies', uid);
+  const auditRef = doc(collection(db, 'auditLogs'));
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(policyRef);
+    let nextRevision = 1;
+    let beforeData: Record<string, unknown> = {};
+
+    if (snap.exists()) {
+      const data = snap.data();
+      nextRevision = Number(data.revision || 0) + 1;
+      beforeData = data;
+    }
+
+    const nextDoc: LocationPolicyDoc = {
+      schema_version: 1,
+      revision: nextRevision,
+      enabled: policy.enabled,
+      mode: policy.mode,
+      start_time: policy.start_time,
+      end_time: policy.end_time,
+      work_days: policy.work_days,
+      sampling_interval_seconds: policy.sampling_interval_seconds,
+      updated_at: serverTimestamp() as any,
+      updated_by_uid: actor.uid,
+      updated_by_email: actor.email,
+    };
+
+    tx.set(policyRef, nextDoc);
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'update_location_policy',
+      summary: policy.enabled
+        ? `تفعيل سياسة تتبع الموقع (${policy.mode === 'work_hours' ? 'ساعات العمل' : 'مستمر'}، v${nextRevision})`
+        : `تعطيل سياسة تتبع الموقع (v${nextRevision})`,
+      before: beforeData,
+      after: {
+        schema_version: 1,
+        revision: nextRevision,
+        enabled: policy.enabled,
+        mode: policy.mode,
+        start_time: policy.start_time,
+        end_time: policy.end_time,
+        work_days: policy.work_days,
+        sampling_interval_seconds: policy.sampling_interval_seconds,
+      },
+      created_at: serverTimestamp(),
+    });
+
+    return nextRevision;
+  });
+}
+
+export async function deprovisionDevice(
+  db: Firestore,
+  uid: string,
+  reason: string,
+  actor: { uid: string; email: string }
+): Promise<void> {
+  const auditRef = doc(collection(db, 'auditLogs'));
+  const cmdRef = doc(collection(db, 'deviceCommands', uid, 'commands'));
+
+  await runTransaction(db, async (tx) => {
+    tx.set(cmdRef, {
+      type: 'deprovision',
+      status: 'pending',
+      reason,
+      created_at: serverTimestamp(),
+      created_by_uid: actor.uid,
+      created_by_email: actor.email,
+    });
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'deprovision_device',
+      summary: `طلب إنهاء إدارة مسؤول الجهاز (Device Owner) المصرّح: ${reason}`,
+      before: {},
+      after: { deprovision_requested: true, reason },
+      created_at: serverTimestamp(),
+    });
+  });
+}
+
+export function subscribeToCompanyApps(
+  db: Firestore,
+  callback: (apps: CompanyAppDoc[]) => void,
+  options?: { onError?: (err: Error) => void }
+): Unsubscribe {
+  const q = query(collection(db, 'companyApps'), orderBy('created_at', 'desc'), limit(100));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: CompanyAppDoc[] = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<CompanyAppDoc, 'id'>),
+      }));
+      callback(list);
+    },
+    (err) => {
+      if (options?.onError) {
+        options.onError(err);
+      }
+      callback([]);
+    }
+  );
+}
+
+export async function addCompanyApp(
+  db: Firestore,
+  app: Omit<CompanyAppDoc, 'id' | 'created_at' | 'created_by_uid' | 'created_by_email'>,
+  actor: { uid: string; email: string },
+  customAppId?: string
+): Promise<string> {
+  const cleanShaApk = (app.sha256_apk || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+  const cleanShaCert = (app.sha256_cert || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+
+  if (cleanShaApk.length !== 64) {
+    throw new Error('بصمة ملف APK بصيغة SHA-256 غير صالحة؛ يجب أن تتكون من 64 حرفاً ست عشرياً.');
+  }
+
+  // SECURITY RULE: Browser/client can NEVER mark an APK as 'verified' or infer verification from hash length.
+  // All client-submitted records start strictly as 'pending_inspection' with inspected_by_server = false.
+  const inspectionStatus = 'pending_inspection' as const;
+
+  const auditRef = doc(collection(db, 'auditLogs'));
+  const docRef = customAppId
+    ? doc(db, 'companyApps', customAppId)
+    : doc(collection(db, 'companyApps'));
+
+  const storagePath =
+    app.storage_path || `company_apps/${docRef.id}/${app.package_name || 'app'}.apk`;
+
+  await runTransaction(db, async (tx) => {
+    tx.set(docRef, {
+      ...app,
+      sha256_apk: cleanShaApk,
+      sha256_cert: cleanShaCert,
+      storage_path: storagePath,
+      inspection_status: inspectionStatus,
+      inspected_by_server: false,
+      created_at: serverTimestamp(),
+      created_by_uid: actor.uid,
+      created_by_email: actor.email,
+    });
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: 'global',
+      action: 'add_company_app',
+      summary: `رفع حزمة تطبيق شركة للمعاينة: ${app.app_name} (${app.package_name} v${app.version_name}) - بانتظار الفحص الخادمي`,
+      before: {},
+      after: {
+        app_id: docRef.id,
+        package_name: app.package_name,
+        version_code: app.version_code,
+        storage_path: storagePath,
+        inspection_status: inspectionStatus,
+        inspected_by_server: false,
+      },
+      created_at: serverTimestamp(),
+    });
+  });
+
+  return docRef.id;
+}
+
+/**
+ * Triggers the authoritative server-side Cloud Function `inspectCompanyApk` to verify
+ * the APK's cryptographic signature, content digests, and binary AndroidManifest.xml in Storage.
+ */
+export async function requestServerApkInspection(
+  appId: string,
+  invokeCallable?: (name: string, payload: { appId: string }) => Promise<unknown>
+): Promise<void> {
+  if (!appId) {
+    throw new Error('معرّف التطبيق (appId) مطلوب لطلب الفحص الخادمي.');
+  }
+  if (invokeCallable) {
+    await invokeCallable('inspectCompanyApk', { appId });
+    return;
+  }
+  const { getFunctions, httpsCallable } = await import('firebase/functions');
+  const { getApp } = await import('firebase/app');
+  const functionsInstance = getFunctions(getApp(), 'us-central1');
+  const inspectFn = httpsCallable(functionsInstance, 'inspectCompanyApk');
+  await inspectFn({ appId });
+}
+
+export function subscribeToInstallRequests(
+  db: Firestore,
+  callback: (reqs: InstallRequestDoc[]) => void,
+  options?: { onError?: (err: Error) => void }
+): Unsubscribe {
+  const q = query(collection(db, 'installRequests'), orderBy('created_at', 'desc'), limit(100));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: InstallRequestDoc[] = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<InstallRequestDoc, 'id'>),
+      }));
+      callback(list);
+    },
+    (err) => {
+      if (options?.onError) {
+        options.onError(err);
+      }
+      callback([]);
+    }
+  );
+}
+
+export async function reviewInstallRequest(
+  db: Firestore,
+  requestId: string,
+  decision: 'approved' | 'rejected',
+  notes: string,
+  actor: { uid: string; email: string }
+): Promise<void> {
+  const reqRef = doc(db, 'installRequests', requestId);
+  const auditRef = doc(collection(db, 'auditLogs'));
+
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(reqRef);
+    if (!snap.exists()) throw new Error('طلب التثبيت غير موجود');
+    const data = snap.data();
+
+    tx.update(reqRef, {
+      status: decision,
+      admin_notes: notes,
+      reviewed_at: serverTimestamp(),
+      reviewed_by_uid: actor.uid,
+      reviewed_by_email: actor.email,
+    });
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: data.device_uid,
+      action: decision === 'approved' ? 'approve_install_request' : 'reject_install_request',
+      summary: `${decision === 'approved' ? 'الموافقة على' : 'رفض'} طلب تثبيت ${data.app_name} للجهاز ${data.device_uid}`,
+      before: { status: data.status },
+      after: { status: decision, admin_notes: notes },
+      created_at: serverTimestamp(),
+    });
+  });
+}
+
+export async function sendInstallCommand(
+  db: Firestore,
+  uid: string,
+  app: CompanyAppDoc,
+  actor: { uid: string; email: string },
+  options?: { addToKiosk?: boolean }
+): Promise<string> {
+  // Explicitly require inspection_status === 'verified' AND inspected_by_server === true.
+  // Missing inspection_status or unverified records are strictly rejected!
+  if (app.inspection_status !== 'verified' || app.inspected_by_server !== true) {
+    throw new Error(
+      'لا يمكن توزيع التطبيق إلا إذا كانت حالة الفحص الخادمي (inspection_status === "verified") ومؤكدة من الخادم (بانتظار الفحص).'
+    );
+  }
+
+  const cleanApk = (app.sha256_apk || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+  const cleanCert = (app.sha256_cert || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+
+  if (cleanApk.length !== 64 || cleanCert.length !== 64) {
+    throw new Error('بصمة ملف APK وبصمة شهادة المطور SHA-256 إلزاميتان ويجب أن تكونا بصيغة hex صالحة (64 حرفاً).');
+  }
+
+  if (!app.storage_path || !app.storage_path.startsWith(`company_apps/${app.id}/`)) {
+    throw new Error('مسار التخزين المحمي (storage_path) مفقود أو غير مرتبط بنسخة التطبيق المعتمدة.');
+  }
+
+  const fileName = app.storage_path.split('/').pop() || '';
+  const cmdRef = doc(collection(db, 'deviceCommands', uid, 'commands'));
+  const grantRef = doc(db, 'deviceDownloadGrants', uid, 'apps', app.id);
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  const cmdData = {
+    type: 'install_app',
+    status: 'pending',
+    cancelled: false,
+    app_id: app.id,
+    package_name: app.package_name,
+    app_name: app.app_name,
+    version_code: app.version_code,
+    storage_path: app.storage_path,
+    storage_generation: app.storage_generation || '1',
+    download_url: app.download_url || '',
+    sha256_apk: cleanApk,
+    sha256_cert: cleanCert,
+    add_to_kiosk: Boolean(options?.addToKiosk),
+    kiosk_addition_status: options?.addToKiosk ? 'installed_pending_server_policy' : 'not_requested',
+    expires_at: expiresAt.toISOString(),
+    created_at: serverTimestamp(),
+    created_by_uid: actor.uid,
+    created_by_email: actor.email,
+  };
+
+  await setDoc(cmdRef, cmdData);
+
+  // Create per-device, task-bound download grant enforced by storage.rules
+  try {
+    await setDoc(grantRef, {
+      app_id: app.id,
+      device_uid: uid,
+      command_id: cmdRef.id,
+      file_name: fileName,
+      storage_path: app.storage_path,
+      storage_generation: app.storage_generation || '1',
+      sha256_apk: cleanApk,
+      status: 'active',
+      expires_at: expiresAt,
+      created_at: serverTimestamp(),
+      created_by_uid: actor.uid,
+    });
+  } catch (grantErr) {
+    console.warn('Could not write deviceDownloadGrant:', grantErr);
+  }
+
+  // Append audit log for distribution
+  try {
+    const auditRef = doc(collection(db, 'auditLogs'));
+    await setDoc(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'send_install_command',
+      summary: `إرسال أمر تثبيت ${app.app_name} (v${app.version_name}) إلى الجهاز ${uid}${options?.addToKiosk ? ' مع إضافته لشاشة الكشك' : ''}`,
+      before: {},
+      after: {
+        command_id: cmdRef.id,
+        app_id: app.id,
+        package_name: app.package_name,
+        version_code: app.version_code,
+        add_to_kiosk: Boolean(options?.addToKiosk),
+      },
+      created_at: serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn('Could not write audit log for install command:', e);
+  }
+
+  return cmdRef.id;
+}
+
+/**
+ * Cancels a pending/in_progress install command and immediately revokes the device's Storage download grant.
+ */
+export async function cancelInstallCommand(
+  db: Firestore,
+  uid: string,
+  cmdId: string,
+  appId: string | undefined,
+  actor: { uid: string; email: string }
+): Promise<void> {
+  const cmdRef = doc(db, 'deviceCommands', uid, 'commands', cmdId);
+  const auditRef = doc(collection(db, 'auditLogs'));
+
+  await runTransaction(db, async (tx) => {
+    const cmdSnap = await tx.get(cmdRef);
+    if (!cmdSnap.exists()) {
+      throw new Error('أمر التثبيت غير موجود');
+    }
+    const cmdData = cmdSnap.data();
+    const targetAppId = appId || cmdData.app_id;
+
+    tx.update(cmdRef, {
+      status: 'cancelled',
+      cancelled: true,
+      completed_at: serverTimestamp(),
+      error: 'تم إلغاء أمر التثبيت من قِبل المشرف',
+    });
+
+    if (targetAppId) {
+      const grantRef = doc(db, 'deviceDownloadGrants', uid, 'apps', targetAppId);
+      tx.set(
+        grantRef,
+        {
+          status: 'revoked',
+          revoked_at: serverTimestamp(),
+          revoked_by_uid: actor.uid,
+        },
+        { merge: true }
+      );
+    }
+
+    tx.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'cancel_install_command',
+      summary: `إلغاء أمر التثبيت (${cmdId}) وسحب تفويض تنزيل الحزمة للجهاز (${uid})`,
+      before: { status: cmdData.status },
+      after: { status: 'cancelled', cancelled: true },
+      created_at: serverTimestamp(),
+    });
+  });
+}
+
+/**
+ * Authoritatively adds an installed package to the device's server-side kioskPolicies/{uid}
+ * after installation confirmation.
+ * Re-reads the command document, enrollment, deviceStatus, kioskPolicy, policy, and inventory
+ * inside the transaction. Never trusts phone-writable fields for `add_to_kiosk`.
+ */
+export async function addInstalledAppToServerKioskPolicy(
+  db: Firestore,
+  uid: string,
+  packageName: string,
+  cmdId: string,
+  actor: { uid: string; email: string }
+): Promise<{ ok: boolean; newRevision?: number; waitingForInventory?: boolean; error?: string }> {
+  const kioskRef = doc(db, 'kioskPolicies', uid);
+  const policyRef = doc(db, 'policies', uid);
+  const enrollmentRef = doc(db, 'enrollments', uid);
+  const statusRef = doc(db, 'deviceStatus', uid);
+  const inventoryRef = doc(db, 'deviceAppInventory', uid);
+  const cmdRef = doc(db, 'deviceCommands', uid, 'commands', cmdId);
+  const auditRef = doc(collection(db, 'auditLogs'));
+
+  try {
+    const txOutcome = await runTransaction(db, async (tx) => {
+      const [cmdSnap, enrollmentSnap, statusSnap, kioskSnap, policySnap, inventorySnap] =
+        await Promise.all([
+          tx.get(cmdRef),
+          tx.get(enrollmentRef),
+          tx.get(statusRef),
+          tx.get(kioskRef),
+          tx.get(policyRef),
+          tx.get(inventoryRef),
+        ]);
+
+      if (!cmdSnap.exists()) {
+        throw new Error('وثيقة أمر التثبيت غير موجودة في الخادم.');
+      }
+      const cmdData = cmdSnap.data();
+
+      // 1. Authoritative check: Admin must have set add_to_kiosk === true on the command!
+      if (cmdData.add_to_kiosk !== true) {
+        throw new Error('لم يختر المشرف إضافة هذا التطبيق إلى شاشة الشركة (add_to_kiosk !== true).');
+      }
+
+      // 2. Idempotency check
+      if (
+        cmdData.kiosk_addition_status === 'added' &&
+        Number(cmdData.kiosk_added_for_version) === Number(cmdData.version_code)
+      ) {
+        return {
+          waitingForInventory: false,
+          newRevision: Number(cmdData.kiosk_added_revision || 1),
+        };
+      }
+
+      // 3. Verify command status is executed and not cancelled
+      if (cmdData.cancelled === true || cmdData.status !== 'executed') {
+        throw new Error('لا يمكن إضافة التطبيق لشاشة الشركة لأن الأمر ملغى أو لم يكتمل تثبيته بعد.');
+      }
+
+      // 4. Verify installed version matches target version_code
+      if (Number(cmdData.installed_version) !== Number(cmdData.version_code)) {
+        throw new Error(
+          `إصدار التطبيق المثبت (${cmdData.installed_version}) لا يطابق الإصدار المعتمد في الأمر (${cmdData.version_code}).`
+        );
+      }
+
+      // 5. Verify device approval
+      if (!enrollmentSnap.exists() || enrollmentSnap.data().approved !== true) {
+        throw new Error('الجهاز غير معتمد حالياً في النظام (enrollments).');
+      }
+
+      // 6. Validate package name and protected packages
+      const targetPkg = String(cmdData.package_name || packageName || '').trim();
+      const pkgValidation = validatePackageName(targetPkg);
+      if (
+        !pkgValidation.valid ||
+        targetPkg === MDM_AGENT_PACKAGE_NAME ||
+        Boolean(HARDCODED_PROTECTED_PACKAGES[targetPkg])
+      ) {
+        throw new Error(`الحزمة (${targetPkg}) محمية أو غير صالحة ولا يمكن إضافتها لشاشة الشركة.`);
+      }
+
+      if (!kioskSnap.exists()) {
+        throw new Error('لم يتم إعداد سياسة شاشة الشركة (Kiosk) لهذا الجهاز بعد؛ قم بإعداد كلمة المرور أولاً.');
+      }
+
+      const kioskData = kioskSnap.data();
+
+      // 7. Verify device eligibility if Kiosk is enabled
+      if (kioskData.enabled === true) {
+        if (
+          !statusSnap.exists() ||
+          statusSnap.data().device_owner !== true ||
+          Number(statusSnap.data().android_sdk || 0) < 30
+        ) {
+          throw new Error('الجهاز غير مؤهل لتفعيل شاشة الشركة (يتطلب Device Owner وAndroid 11+).');
+        }
+      }
+
+      const currentAllowed: string[] = Array.isArray(kioskData.allowed_apps)
+        ? [...kioskData.allowed_apps]
+        : [];
+
+      // 8. Check blocked_apps conflict
+      if (policySnap.exists()) {
+        const blocked: string[] = Array.isArray(policySnap.data().blocked_apps)
+          ? policySnap.data().blocked_apps
+          : [];
+        if (blocked.includes(targetPkg)) {
+          throw new Error(`التطبيق (${targetPkg}) موجود في قائمة التطبيقات المحظورة؛ أزله من الحظر أولاً.`);
+        }
+      }
+
+      // 9. Mandatory actual inventory verification when Kiosk is enabled:
+      // NEVER skip this check when inventory is missing or does not contain the newly installed app yet!
+      if (kioskData.enabled === true) {
+        const invApps =
+          inventorySnap.exists() && Array.isArray(inventorySnap.data().apps)
+            ? (inventorySnap.data().apps as Array<Record<string, unknown>>)
+            : null;
+        const appRecord = invApps
+          ? invApps.find((a) => a && a.package_name === targetPkg)
+          : null;
+
+        if (!invApps || !appRecord) {
+          tx.update(cmdRef, {
+            kiosk_addition_status: 'waiting_for_inventory',
+            kiosk_addition_error: null,
+            kiosk_addition_message:
+              'بانتظار تحديث جرد التطبيقات من الجهاز للتحقق من أيقونة التشغيل وتوفر الحزمة',
+          });
+          return { waitingForInventory: true };
+        }
+
+        if (appRecord.has_launcher_icon !== true) {
+          throw new Error(
+            `التطبيق (${targetPkg}) لا يملك أيقونة تشغيل صالحة (has_launcher_icon !== true) في جرد الجهاز.`
+          );
+        }
+        if (appRecord.is_enabled === false || appRecord.is_hidden_by_agent === true) {
+          throw new Error(`التطبيق (${targetPkg}) معطل أو مخفي في جرد الجهاز.`);
+        }
+      }
+
+      if (currentAllowed.includes(targetPkg)) {
+        const rev = Number(kioskData.revision || 1);
+        tx.update(cmdRef, {
+          kiosk_addition_status: 'added',
+          kiosk_addition_error: null,
+          kiosk_addition_message: null,
+          kiosk_added_revision: rev,
+          kiosk_added_for_version: Number(cmdData.version_code),
+        });
+        return { waitingForInventory: false, newRevision: rev };
+      }
+
+      if (currentAllowed.length >= 50) {
+        throw new Error('تجاوزت قائمة شاشة الشركة الحد الأقصى المسموح به (50 تطبيقاً).');
+      }
+
+      const nextAllowed = Array.from(new Set([...currentAllowed, targetPkg])).sort();
+      const nextRev = Number(kioskData.revision || 0) + 1;
+
+      const nextKioskDoc = {
+        schema_version: 1,
+        revision: nextRev,
+        enabled: Boolean(kioskData.enabled),
+        allowed_apps: nextAllowed,
+        exit_salt: kioskData.exit_salt,
+        exit_hash: kioskData.exit_hash,
+      };
+
+      tx.set(kioskRef, nextKioskDoc);
+      tx.update(cmdRef, {
+        kiosk_addition_status: 'added',
+        kiosk_addition_error: null,
+        kiosk_addition_message: null,
+        kiosk_added_revision: nextRev,
+        kiosk_added_for_version: Number(cmdData.version_code),
+      });
+
+      tx.set(auditRef, {
+        actor_uid: actor.uid,
+        actor_email: actor.email,
+        target_uid: uid,
+        action: 'update_policy',
+        summary: `إضافة التطبيق المثبت (${targetPkg}) تلقائياً إلى شاشة الشركة (إصدار v${nextRev})`,
+        before: {
+          revision: kioskData.revision,
+          allowed_apps: currentAllowed,
+        },
+        after: {
+          revision: nextRev,
+          allowed_apps: nextAllowed,
+        },
+        created_at: serverTimestamp(),
+      });
+
+      return { waitingForInventory: false, newRevision: nextRev };
+    });
+
+    if (txOutcome.waitingForInventory) {
+      return { ok: true, waitingForInventory: true };
+    }
+    return { ok: true, newRevision: txOutcome.newRevision };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    try {
+      await updateDoc(cmdRef, {
+        kiosk_addition_status: 'failed',
+        kiosk_addition_error: errMsg,
+      });
+    } catch {
+      // Ignore secondary update error
+    }
+    return { ok: false, error: errMsg };
+  }
+}
+
+export function subscribeToDeviceLocations(
+  db: Firestore,
+  uid: string,
+  maxPoints: number = 50,
+  callback: (points: DeviceLocationPoint[]) => void,
+  options?: { onError?: (err: Error) => void }
+): Unsubscribe {
+  const q = query(
+    collection(db, 'deviceLocations', uid, 'points'),
+    orderBy('recorded_at', 'desc'),
+    limit(maxPoints)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: DeviceLocationPoint[] = snap.docs.map((d) => ({
+        point_id: d.id,
+        ...(d.data() as Omit<DeviceLocationPoint, 'point_id'>),
+      }));
+      callback(list);
+    },
+    (err) => {
+      if (options?.onError) {
+        options.onError(err);
+      }
+      callback([]);
+    }
+  );
+}
+
+export async function cleanOldLocations(
+  db: Firestore,
+  uid: string,
+  daysRetention: number = 30,
+  actor: { uid: string; email: string }
+): Promise<{ deletedCount: number }> {
+  const cutoffTime = Date.now() - daysRetention * 24 * 60 * 60 * 1000;
+  const cutoffDate = new Date(cutoffTime);
+
+  const pointsRef = collection(db, 'deviceLocations', uid, 'points');
+  const snap = await getDocs(pointsRef);
+
+  let deletedCount = 0;
+  const batch = writeBatch(db);
+
+  snap.forEach((docSnap) => {
+    const data = docSnap.data();
+    let pointTime = 0;
+    if (data.recorded_at) {
+      if (typeof data.recorded_at.toDate === 'function') {
+        pointTime = data.recorded_at.toDate().getTime();
+      } else if (typeof data.recorded_at === 'number') {
+        pointTime = data.recorded_at;
+      } else if (typeof data.recorded_at === 'string') {
+        pointTime = new Date(data.recorded_at).getTime();
+      }
+    }
+    if (pointTime > 0 && pointTime < cutoffTime) {
+      batch.delete(docSnap.ref);
+      deletedCount++;
+    }
+  });
+
+  if (deletedCount > 0) {
+    const auditRef = doc(collection(db, 'auditLogs'));
+    batch.set(auditRef, {
+      actor_uid: actor.uid,
+      actor_email: actor.email,
+      target_uid: uid,
+      action: 'clean_locations',
+      summary: `تنظيف سجل المواقع القديمة للجهاز ${uid} (حذف ${deletedCount} نقطة أقدم من ${daysRetention} يوماً)`,
+      before: { retention_days: daysRetention },
+      after: { deleted_points: deletedCount, cutoff_iso: cutoffDate.toISOString() },
+      created_at: serverTimestamp(),
+    });
+    await batch.commit();
+  }
+
+  return { deletedCount };
+}
+
 

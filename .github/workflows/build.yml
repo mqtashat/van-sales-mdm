@@ -42,14 +42,18 @@ jobs:
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/injaz-mdm-release.p12"
           test -s "$RUNNER_TEMP/injaz-mdm-release.p12"
           keytool -list -storetype PKCS12 -keystore "$RUNNER_TEMP/injaz-mdm-release.p12" -alias "$KEY_ALIAS" -storepass:env STORE_PASSWORD > /dev/null
-      - name: Test, lint and assemble with persistent signature
+      - name: Test, lint and assemble sequentially with persistent signature
         env:
           INJAZ_REQUIRE_SIGNING: 'true'
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/injaz-mdm-release.p12
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+        run: |
+          set -euo pipefail
+          gradle --no-daemon testDebugUnitTest
+          gradle --no-daemon lintDebug
+          gradle --no-daemon assembleDebug
       - name: Print lint diagnostics on failure
         if: failure()
         run: cat app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt || true
@@ -89,8 +93,8 @@ jobs:
           distribution: temurin
           java-version: '21'
       - run: npm install --prefix tests --ignore-scripts --no-audit --no-fund
-      - name: Test Firebase authorization rules locally
-        run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-mdm "npm --prefix tests test"
+      - name: Test Firebase Firestore and Storage authorization rules locally
+        run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore,storage --project demo-mdm "npm --prefix tests test"
 
 
   push-functions:
@@ -101,17 +105,93 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Ensure functions/Dockerfile exists
+        run: |
+          set -euo pipefail
+          if [ ! -f "functions/Dockerfile" ]; then
+            if [ -f "functions/Dockerfile.txt" ]; then
+              echo "functions/Dockerfile missing, copying from functions/Dockerfile.txt..."
+              cp functions/Dockerfile.txt functions/Dockerfile
+            else
+              echo "::error::Both functions/Dockerfile and functions/Dockerfile.txt are missing!"
+              exit 1
+            fi
+          fi
+      - name: Verify required container & inspector assets exist
+        run: |
+          set -euo pipefail
+          for file in functions/Dockerfile functions/bin/apksigner.jar functions/cloudRunInspectorServer.js functions/index.js functions/package.json; do
+            if [ ! -f "$file" ]; then
+              echo "::error::Missing required inspector asset: $file"
+              exit 1
+            fi
+          done
+          echo "All required container assets are present."
+      - name: Verify bundled official apksigner.jar
+        run: java -jar functions/bin/apksigner.jar --version
       - run: npm ci --prefix functions --ignore-scripts --no-audit --no-fund
       - run: npm --prefix functions test
-      - name: Verify function exports load
+      - name: Build Inspector Container Image
+        run: docker build -t mdm-inspector:test functions/
+      - name: Test Inspector Container Startup and Healthz
+        run: |
+          set -euo pipefail
+          CONTAINER_ID=$(docker run -d -p 8080:8080 -e NODE_ENV=production -e FIREBASE_PROJECT_ID=demo-mdm -e STORAGE_BUCKET=demo-mdm.appspot.com mdm-inspector:test)
+          sleep 3
+          curl -f http://127.0.0.1:8080/healthz
+          docker stop "$CONTAINER_ID"
+      - name: Verify Inspector Container fails on missing required production env vars
+        run: |
+          set -euo pipefail
+          if docker run --rm -e NODE_ENV=production mdm-inspector:test node -e "require('./firebaseAdmin').initFirebaseAdmin({isCloudRunServer: true, isTestMode: false})"; then
+            echo "Expected container to fail when required env vars are missing"
+            exit 1
+          else
+            echo "Container correctly failed closed on missing production env vars."
+          fi
+      - name: Verify all old and new function exports and Cloud Run inspector load
         env:
           GCLOUD_PROJECT: demo-mdm
-        run: node -e "const f=require('./functions'); for(const n of ['registerMdmPush','mdmPolicyChanged','mdmEnrollmentChanged','mdmPushRegistered']) if(typeof f[n] !== 'function') throw Error(n)"
+          FIREBASE_PROJECT_ID: demo-mdm
+          STORAGE_BUCKET: demo-mdm.appspot.com
+        run: |
+          node -e "
+            const f = require('./functions');
+            const requiredFns = [
+              'registerMdmPush',
+              'inspectCompanyApk',
+              'getTaskDownloadAuthorization',
+              'mdmPolicyChanged',
+              'mdmEnrollmentChanged',
+              'mdmPushRegistered',
+              'mdmKioskChanged',
+              'cleanupOldLocationPoints',
+              'onCommandCompletedKioskSync',
+              'onInventoryUpdatedKioskSync'
+            ];
+            for (const n of requiredFns) {
+              if (typeof f[n] !== 'function') throw new Error('Missing or invalid export: ' + n);
+            }
+            if (!f._testHelpers || typeof f._testHelpers.executeServerApkInspection !== 'function') {
+              throw new Error('Missing _testHelpers');
+            }
+            const cr = require('./functions/cloudRunInspectorServer');
+            if (typeof cr.createInspectorRequestHandler !== 'function') {
+              throw new Error('Missing cloudRunInspectorServer handler');
+            }
+          "
       - uses: actions/upload-artifact@v4
         with:
           name: injaz-mdm-push-server
           path: |
             functions/*.js
+            functions/bin/**
+            functions/Dockerfile
+            functions/Dockerfile.txt
             functions/package*.json
             functions/test/*.js
             firebase.push.json
@@ -138,7 +218,7 @@ jobs:
       - run: npm run lint
       - run: npm run test:contract
       - run: npm run build
-      - run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-mdm "node --test tests/rules.test.mjs"
+      - run: npx --yes firebase-tools@13.35.1 emulators:exec --only firestore,storage --project demo-mdm "node --test tests/rules.test.mjs"
       - uses: actions/upload-artifact@v4
         with:
           name: injaz-admin-kiosk
@@ -154,4 +234,3 @@ jobs:
             admin-web/vite.config.ts
             KIOSK-PILOT.md
           if-no-files-found: error
-

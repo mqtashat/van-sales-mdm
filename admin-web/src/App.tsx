@@ -34,6 +34,8 @@ import { FleetAppsTab } from './components/FleetAppsTab';
 import { AuditLogTab } from './components/AuditLogTab';
 import { SettingsTab } from './components/SettingsTab';
 import { DocsAndSecurityTab } from './components/DocsAndSecurityTab';
+import { CompanyAppsTab } from './components/CompanyAppsTab';
+import { LocationsTab } from './components/LocationsTab';
 import {
   Shield,
   Smartphone,
@@ -47,6 +49,8 @@ import {
   PanelRightOpen,
   Menu,
   X,
+  Package,
+  MapPin,
 } from 'lucide-react';
 
 const HISTORY_INDEX_KEY = '__mdmHistoryIdx';
@@ -689,6 +693,16 @@ export function App() {
       icon: <AppWindow className="w-5 h-5 shrink-0" />,
     },
     {
+      id: 'company_apps',
+      label: 'تطبيقات الشركة',
+      icon: <Package className="w-5 h-5 shrink-0" />,
+    },
+    {
+      id: 'locations',
+      label: 'مواقع الأجهزة',
+      icon: <MapPin className="w-5 h-5 shrink-0" />,
+    },
+    {
       id: 'audit',
       label: 'سجل العمليات',
       icon: <FileClock className="w-5 h-5 shrink-0" />,
@@ -1006,6 +1020,8 @@ export function App() {
               {activeTab === 'devices' &&
                 (selectedDeviceUid ? 'إدارة الجهاز وتطبيقاته' : 'أجهزة المندوبين')}
               {activeTab === 'apps' && 'دليل التطبيقات والإجراءات الجماعية'}
+              {activeTab === 'company_apps' && 'تطبيقات الشركة وطلبات التثبيت'}
+              {activeTab === 'locations' && 'مواقع أجهزة الشركة والمسارات الميدانية'}
               {activeTab === 'audit' && 'سجل العمليات الإدارية'}
               {activeTab === 'settings' && 'الإعدادات والسياسة الافتراضية'}
             </h2>
@@ -1069,6 +1085,23 @@ export function App() {
               devices={mergedDevices}
               db={activeDb}
               actor={activeActor}
+            />
+          )}
+
+          {activeTab === 'company_apps' && (
+            <CompanyAppsTab
+              db={activeDb}
+              adminIdentity={activeActor}
+              devices={mergedDevices}
+              storage={services?.storage}
+            />
+          )}
+
+          {activeTab === 'locations' && (
+            <LocationsTab
+              db={activeDb}
+              adminIdentity={activeActor}
+              devices={mergedDevices}
             />
           )}
 

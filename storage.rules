@@ -1,0 +1,84 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    function isNamedVerifiedUser() {
+      return request.auth != null
+        && (!('firebase' in request.auth.token) || request.auth.token.firebase.sign_in_provider != 'anonymous')
+        && request.auth.token.email is string
+        && request.auth.token.email.size() > 3
+        && request.auth.token.email.size() <= 254
+        && request.auth.token.email_verified == true;
+    }
+
+    // Unified Administrator Authorization matching firestore.rules:
+    // Named, email-verified user with either custom claim `admin == true`
+    // or an active record in `/admins/{uid}` (`active == true`).
+    // No hardcoded email lists or test emails.
+    function isAdmin() {
+      return isNamedVerifiedUser() && (
+        (request.auth.token.keys().hasAny(['admin']) && request.auth.token.admin == true)
+        || (
+          firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid))
+          && firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.active == true
+        )
+      );
+    }
+
+    function isApprovedDevice() {
+      return request.auth != null
+        && firestore.exists(/databases/(default)/documents/enrollments/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/enrollments/$(request.auth.uid)).data.approved == true;
+    }
+
+    // Per-device, task-bound download authorization:
+    // 1. Caller must be an approved device (`request.auth.uid`).
+    // 2. A download grant `/deviceDownloadGrants/{uid}/apps/{appId}` must exist for THIS exact device and app,
+    //    have `status == 'active'`, match `file_name == fileName`, and not be expired (`expires_at > request.time`).
+    // 3. The linked command `/deviceCommands/{uid}/commands/{command_id}` must be in `['pending', 'in_progress']` and not cancelled.
+    // 4. The catalog record `/companyApps/{appId}` must be server-verified (`inspection_status == 'verified'`, `inspected_by_server == true`)
+    //    and bound to this exact `storage_path`.
+    function hasValidDeviceDownloadGrant(appId, fileName) {
+      let uid = request.auth.uid;
+      let grantDoc = firestore.get(/databases/(default)/documents/deviceDownloadGrants/$(uid)/apps/$(appId)).data;
+      let cmdDoc = firestore.get(/databases/(default)/documents/deviceCommands/$(uid)/commands/$(grantDoc.command_id)).data;
+      let appDoc = firestore.get(/databases/(default)/documents/companyApps/$(appId)).data;
+      return isApprovedDevice()
+        && firestore.exists(/databases/(default)/documents/deviceDownloadGrants/$(uid)/apps/$(appId))
+        && grantDoc.status == 'active'
+        && grantDoc.file_name == fileName
+        && grantDoc.expires_at > request.time
+        && firestore.exists(/databases/(default)/documents/deviceCommands/$(uid)/commands/$(grantDoc.command_id))
+        && cmdDoc.status in ['pending', 'in_progress']
+        && (!('cancelled' in cmdDoc) || cmdDoc.cancelled != true)
+        && firestore.exists(/databases/(default)/documents/companyApps/$(appId))
+        && appDoc.inspection_status == 'verified'
+        && appDoc.inspected_by_server == true
+        && appDoc.storage_path == ('company_apps/' + appId + '/' + fileName);
+    }
+
+    // Enterprise company APK distribution
+    // - Only the targeted approved device with an active, non-expired task grant (or an Admin) may read.
+    // - Approved devices NOT targeted by an active command for `appId` are strictly denied.
+    // - Once uploaded (`resource == null`), the APK file is immutable (`allow update: if false`) so it cannot be swapped after inspection.
+    match /company_apps/{appId}/{fileName} {
+      allow read: if isAdmin() || hasValidDeviceDownloadGrant(appId, fileName);
+      allow create: if isAdmin()
+        && resource == null
+        && request.resource.size < 250 * 1024 * 1024
+        && request.resource.contentType in ['application/vnd.android.package-archive', 'application/octet-stream'];
+      allow update: if false;
+      allow delete: if isAdmin()
+        && (
+          !firestore.exists(/databases/(default)/documents/companyApps/$(appId))
+          || firestore.get(/databases/(default)/documents/companyApps/$(appId)).data.inspection_status != 'verified'
+        );
+    }
+
+    // Reject all other paths by default
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

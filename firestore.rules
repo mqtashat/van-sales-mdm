@@ -1,48 +1,189 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function own(uid) { return request.auth != null && request.auth.uid == uid; }
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function own(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
     function approved(uid) {
-      return own(uid) && exists(/databases/$(database)/documents/enrollments/$(uid))
+      return own(uid)
+        && exists(/databases/$(database)/documents/enrollments/$(uid))
         && get(/databases/$(database)/documents/enrollments/$(uid)).data.approved == true;
     }
-    // Enrollment approval and policy writes are console/IAM admin only in this pilot.
+
+    function isNamedVerifiedUser() {
+      return request.auth != null
+        && (!('firebase' in request.auth.token) || request.auth.token.firebase.sign_in_provider != 'anonymous')
+        && request.auth.token.email is string
+        && request.auth.token.email.size() > 3
+        && request.auth.token.email.size() <= 254
+        && request.auth.token.email_verified == true;
+    }
+
+    // Administrator authorization requires a named, email-verified user AND either:
+    // 1. A trusted Custom Claim (request.auth.token.admin == true) set via Firebase Admin SDK, OR
+    // 2. An active record in /admins/{uid} provisioned via Firebase Console / Admin SDK (client writes forbidden).
+    function isAdmin() {
+      return isNamedVerifiedUser() && (
+        (request.auth.token.keys().hasAny(['admin']) && request.auth.token.admin == true)
+        || (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+          && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
+        )
+      );
+    }
+
+    function isValidEnrollment(data) {
+      return data.keys().hasAll(['approved'])
+        && data.keys().hasOnly(['approved'])
+        && data.approved is bool;
+    }
+
+    // Round-trip equality rejects non-strings and separator injection without 50 function calls.
+    function validJoinedApps(apps) {
+      let joined = apps.join(',');
+      return joined.split(',') == apps
+        && joined.matches('^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+(,[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+)*$')
+        && joined.matches('^[^,]{3,150}(,[^,]{3,150})*$');
+    }
+    function areAllBlockedAppsValid(apps) {
+      return apps is list && apps.size() <= 50
+        && !apps.hasAny(['com.company.mdmagent','com.android.settings','com.android.systemui','com.google.android.gms','com.google.android.gsf','com.android.vending'])
+        && (apps.size() == 0 || validJoinedApps(apps));
+    }
+
+    function isValidPolicy(data) {
+      return data.keys().hasAll(['schema_version', 'revision', 'block_tethering', 'blocked_apps'])
+        && data.keys().hasOnly(['schema_version', 'revision', 'block_tethering', 'blocked_apps'])
+        && data.schema_version is int
+        && data.schema_version == 1
+        && data.revision is int
+        && data.revision >= 1
+        && data.block_tethering is bool
+        && areAllBlockedAppsValid(data.blocked_apps);
+    }
+
+    function isValidDeviceStatus(data) {
+      return data.keys().hasAll(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version'])
+        && data.keys().hasOnly(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version', 'device_owner_protected', 'deprovisioned', 'block_app_installs', 'location_policy_enabled', 'location_switch_on', 'location_service_running'])
+        && data.device_owner is bool
+        && data.applied_revision is int
+        && data.applied_revision >= 0
+        && data.tethering_restricted is bool
+        && data.last_seen == request.time
+        && data.model is string && data.model.size() <= 200
+        && data.android_sdk is int
+        && data.battery_percent is int
+        && data.error is string && data.error.size() <= 1000
+        && data.agent_version is string && data.agent_version.size() <= 40;
+    }
+
+    function isValidDeviceMetadata(data) {
+      return data.keys().hasAll(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email'])
+        && data.keys().hasOnly(['device_name', 'rep_name', 'updated_at', 'updated_by_uid', 'updated_by_email', 'archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])
+        && data.device_name is string && data.device_name.size() <= 120
+        && data.rep_name is string && data.rep_name.size() <= 120
+        && data.updated_at == request.time
+        && data.updated_by_uid is string && data.updated_by_uid == request.auth.uid
+        && data.updated_by_email is string && data.updated_by_email == request.auth.token.email
+        && (!('archived' in data) || (
+          data.archived is bool
+          && (!('archived_at' in data) || data.archived_at == null || data.archived_at == request.time)
+          && (!('archived_by_uid' in data) || data.archived_by_uid == null || (data.archived_by_uid is string && data.archived_by_uid == request.auth.uid))
+          && (!('archived_by_email' in data) || data.archived_by_email == null || (data.archived_by_email is string && data.archived_by_email == request.auth.token.email))
+        ));
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['actor_uid', 'actor_email', 'target_uid', 'action', 'summary', 'before', 'after', 'created_at'])
+        && data.keys().hasOnly(['actor_uid', 'actor_email', 'target_uid', 'action', 'summary', 'before', 'after', 'created_at'])
+        && data.actor_uid is string && data.actor_uid == request.auth.uid
+        && data.actor_email is string && data.actor_email == request.auth.token.email
+        && data.target_uid is string && isValidId(data.target_uid)
+        && data.action is string && data.action in [
+          'approve_device',
+          'revoke_approval',
+          'create_policy',
+          'update_policy',
+          'update_metadata',
+          'archive_device',
+          'restore_device',
+          'update_install_policy',
+          'update_location_policy',
+          'deprovision_device',
+          'approve_install_request',
+          'reject_install_request',
+          'add_company_app',
+          'send_install_command',
+          'cancel_install_command',
+          'clean_locations'
+        ]
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 500
+        && data.before is map
+        && data.after is map
+        && data.created_at == request.time;
+    }
+
+    // 1. Device Enrollment Records
     match /enrollments/{uid} {
-      allow get: if own(uid);
-      allow list, create, update, delete: if false;
+      allow get: if isValidId(uid) && (own(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) && isValidEnrollment(request.resource.data) && isAdmin();
+      allow delete: if false;
     }
+
+    // 2. Device Policies (Contract with Android Agent com.company.mdmagent)
     match /policies/{uid} {
-      allow get: if approved(uid);
-      allow list, create, update, delete: if false;
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(uid) && isValidPolicy(request.resource.data) && isAdmin();
+      allow update: if isValidId(uid)
+        && isValidPolicy(request.resource.data)
+        && request.resource.data.revision > resource.data.revision
+        && isAdmin();
+      allow delete: if false;
     }
+
+    // 3. Self-Reported Device Execution Status (Written by Approved Device Only; Read by Device & Admin)
     match /deviceStatus/{uid} {
-      allow get: if approved(uid);
-      allow create, update: if approved(uid)
-        && request.resource.data.keys().hasAll(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version'])
-        && request.resource.data.keys().hasOnly(['device_owner', 'applied_revision', 'tethering_restricted', 'last_seen', 'model', 'android_sdk', 'battery_percent', 'error', 'agent_version'])
-        && request.resource.data.device_owner is bool
-        && request.resource.data.applied_revision is int
-        && request.resource.data.applied_revision >= 0
-        && request.resource.data.tethering_restricted is bool
-        && request.resource.data.last_seen == request.time
-        && request.resource.data.model is string && request.resource.data.model.size() <= 200
-        && request.resource.data.android_sdk is int
-        && request.resource.data.battery_percent is int
-        && request.resource.data.error is string && request.resource.data.error.size() <= 1000
-        && request.resource.data.agent_version is string && request.resource.data.agent_version.size() <= 40;
-      allow list, delete: if false;
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) && isValidDeviceStatus(request.resource.data) && approved(uid);
+      allow delete: if false;
     }
-    match /kioskPolicies/{uid} {
-      allow get: if approved(uid);
-      allow list, write: if false;
+
+    // 4. Separate Administrative Metadata (Device Label & Sales Representative Name)
+    match /deviceMetadata/{uid} {
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) && isValidDeviceMetadata(request.resource.data) && isAdmin();
+      allow delete: if false;
     }
-    match /deviceAppInventory/{uid} {
-      allow get: if approved(uid);
-      allow create, update: if approved(uid) && request.resource.data.schema_version == 1
-        && request.resource.data.reported_at == request.time && request.resource.data.apps is list
-        && request.resource.data.apps.size() <= 1000;
-      allow list, delete: if false;
+
+    // 5. Append-Only Administrative Audit Log
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(logId) && isValidAuditLog(request.resource.data) && isAdmin();
+      allow update, delete: if false;
     }
+
+    // 6. Server-Managed Administrator Registry (Read-Only for Verification; Never Client-Writable)
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && ((isNamedVerifiedUser() && own(uid)) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
     function validKioskStatus(d) {
       return d.keys().hasAll(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
         && d.keys().hasOnly(['configured_revision','active','install_blocked','maintenance','error','reported_at'])
@@ -51,12 +192,169 @@ service cloud.firestore {
         && d.error is string && d.error.size() <= 1000 && d.reported_at == request.time;
     }
     match /kioskStatus/{uid} {
-      allow get: if approved(uid);
-      allow list: if false;
+      allow get: if approved(uid) || isAdmin();
+      allow list: if isAdmin();
       allow create, update: if approved(uid) && validKioskStatus(request.resource.data);
       allow delete: if false;
     }
-    match /{document=**} { allow read, write: if false; }
+    function validKiosk(d) {
+      return d.keys().hasAll(['schema_version','revision','enabled','allowed_apps','exit_salt','exit_hash'])
+        && d.keys().hasOnly(['schema_version','revision','enabled','allowed_apps','exit_salt','exit_hash'])
+        && d.schema_version == 1 && d.revision is int && d.revision > 0 && d.enabled is bool
+        && areAllBlockedAppsValid(d.allowed_apps) && (!d.enabled || d.allowed_apps.size() > 0)
+        && d.exit_salt is string && d.exit_salt.matches('^[a-f0-9]{32}$')
+        && d.exit_hash is string && d.exit_hash.matches('^[a-f0-9]{64}$');
+    }
+    match /kioskPolicies/{uid} {
+      allow get: if approved(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isAdmin() && validKiosk(request.resource.data);
+      allow update: if isAdmin() && validKiosk(request.resource.data) && request.resource.data.revision > resource.data.revision;
+      allow delete: if false;
+    }
+
+    // 7. Device Application Inventory (Published by approved Android Agent 0.3.1+; Read by Device & Admin)
+    match /deviceAppInventory/{uid} {
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if isValidId(uid) && approved(uid);
+      allow delete: if false;
+
+      match /batches/{batchId} {
+        allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+        allow list: if isAdmin();
+        allow create, update: if isValidId(uid) && isValidId(batchId) && approved(uid);
+        allow delete: if false;
+      }
+    }
+
+    // 8. Independent Application Install Policies
+    match /appInstallPolicies/{uid} {
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow write: if isValidId(uid) && isAdmin();
+    }
+
+    // 9. Independent Device Location Policies
+    match /locationPolicies/{uid} {
+      allow get: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow list: if isAdmin();
+      allow write: if isValidId(uid) && isAdmin();
+    }
+
+    // 10. Enterprise Company Apps Catalog (APK distribution)
+    // Clients (even Admins in the browser) CANNOT set inspection_status == 'verified' or inspected_by_server == true!
+    // Only the backend Cloud Function (Admin SDK) can transition inspection_status to 'verified'.
+    // Furthermore, once created, storage_path, sha256_apk, package_name, and version_code are immutable.
+    match /companyApps/{appId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(appId)
+        && isAdmin()
+        && request.resource.data.inspection_status == 'pending_inspection'
+        && (!('inspected_by_server' in request.resource.data) || request.resource.data.inspected_by_server == false)
+        && request.resource.data.sha256_apk is string
+        && request.resource.data.sha256_apk.matches('^[a-f0-9]{64}$')
+        && request.resource.data.storage_path is string
+        && request.resource.data.storage_path.matches('^company_apps/' + appId + '/[A-Za-z0-9._\\-]+\\.apk$');
+      allow update: if isValidId(appId)
+        && isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['app_name', 'description'])
+        && request.resource.data.inspection_status == resource.data.inspection_status
+        && request.resource.data.storage_path == resource.data.storage_path
+        && request.resource.data.sha256_apk == resource.data.sha256_apk;
+      allow delete: if false;
+    }
+
+    // 10b. Per-Device Task-Bound Download Grants (Enforced by storage.rules)
+    match /deviceDownloadGrants/{uid} {
+      allow read, write: if false;
+
+      match /apps/{appId} {
+        allow get: if isValidId(uid) && isValidId(appId) && (approved(uid) || isAdmin());
+        allow list: if isValidId(uid) && isAdmin();
+        allow create, update: if isValidId(uid)
+          && isValidId(appId)
+          && isAdmin()
+          && exists(/databases/$(database)/documents/companyApps/$(appId))
+          && get(/databases/$(database)/documents/companyApps/$(appId)).data.inspection_status == 'verified'
+          && get(/databases/$(database)/documents/companyApps/$(appId)).data.inspected_by_server == true;
+        allow delete: if isValidId(uid) && isValidId(appId) && isAdmin();
+      }
+    }
+
+    // 11. Field Application Install Requests (Restricted to requester device or admin)
+    match /installRequests/{requestId} {
+      allow get: if isAdmin() || (request.auth != null && resource.data.device_uid == request.auth.uid);
+      allow list: if isAdmin();
+      allow create: if request.auth != null
+        && request.resource.data.device_uid == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
+    // 12. Device Location Breadcrumb Points
+    match /deviceLocations/{uid} {
+      allow get, list: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow write: if false;
+
+      match /points/{pointId} {
+        allow get, list: if isValidId(uid) && (approved(uid) || isAdmin());
+        allow create: if isValidId(uid) && approved(uid);
+        allow update: if false;
+        allow delete: if isValidId(uid) && isAdmin();
+      }
+    }
+
+    // 13. Device Remote Commands (Phones can ONLY update execution status and result fields; immutable parameters)
+    // Phones are strictly forbidden from modifying add_to_kiosk, add_to_kiosk_requested, or kiosk_addition_status!
+    match /deviceCommands/{uid} {
+      allow get, list: if isValidId(uid) && (approved(uid) || isAdmin());
+      allow write: if false;
+
+      match /commands/{cmdId} {
+        allow get, list: if isValidId(uid) && (approved(uid) || isAdmin());
+        allow create: if isValidId(uid)
+          && isValidId(cmdId)
+          && isAdmin()
+          && (
+            request.resource.data.type != 'install_app'
+            || (
+              request.resource.data.app_id is string
+              && exists(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id))
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.inspection_status == 'verified'
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.inspected_by_server == true
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.sha256_apk == request.resource.data.sha256_apk
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.sha256_cert == request.resource.data.sha256_cert
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.package_name == request.resource.data.package_name
+              && get(/databases/$(database)/documents/companyApps/$(request.resource.data.app_id)).data.version_code == request.resource.data.version_code
+            )
+          );
+        allow update: if isValidId(uid) && isValidId(cmdId) && (
+          isAdmin() || (
+            approved(uid)
+            && resource.data.status in ['pending', 'in_progress']
+            && (!('cancelled' in resource.data) || resource.data.cancelled != true)
+            && request.resource.data.status in ['in_progress', 'executed', 'failed']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'progress',
+              'completed_at',
+              'error',
+              'error_code',
+              'installed_version',
+              'started_at',
+              'install_outcome'
+            ])
+            && request.resource.data.type == resource.data.type
+            && request.resource.data.package_name == resource.data.package_name
+            && request.resource.data.sha256_apk == resource.data.sha256_apk
+            && request.resource.data.sha256_cert == resource.data.sha256_cert
+            && request.resource.data.version_code == resource.data.version_code
+            && request.resource.data.add_to_kiosk == resource.data.add_to_kiosk
+          )
+        );
+        allow delete: if false;
+      }
+    }
   }
 }
-
