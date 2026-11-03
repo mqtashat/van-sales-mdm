@@ -17,6 +17,16 @@ public class LocationSwitchTest {
         LocationManager manager = (LocationManager) RuntimeEnvironment.getApplication()
                 .getSystemService(Context.LOCATION_SERVICE);
         assertFalse(SyncEngine.isLocationSwitchEnabled(null));
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            // Android 9 exposes the global switch independently of provider availability.
+            Shadows.shadowOf(manager).setLocationEnabled(false);
+            assertFalse(SyncEngine.isLocationSwitchEnabled(manager));
+            Shadows.shadowOf(manager).setLocationEnabled(true);
+            assertTrue(SyncEngine.isLocationSwitchEnabled(manager));
+            Shadows.shadowOf(manager).setLocationEnabled(false);
+            assertFalse(SyncEngine.isLocationSwitchEnabled(manager));
+            return;
+        }
         Shadows.shadowOf(manager).setProviderEnabled(LocationManager.GPS_PROVIDER, false);
         Shadows.shadowOf(manager).setProviderEnabled(LocationManager.NETWORK_PROVIDER, false);
         assertFalse(SyncEngine.isLocationSwitchEnabled(manager));
