@@ -1,11 +1,29 @@
-export type MainTab = 'overview' | 'devices' | 'apps' | 'audit' | 'settings';
-export type DeviceManagementTabId = 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history';
+export type MainTab =
+  | 'overview'
+  | 'devices'
+  | 'apps'
+  | 'company_apps'
+  | 'locations'
+  | 'audit'
+  | 'settings';
+export type DeviceManagementTabId =
+  | 'overview'
+  | 'apps'
+  | 'kiosk'
+  | 'tethering'
+  | 'install_policy'
+  | 'location'
+  | 'actions'
+  | 'history';
 
 const VALID_DEVICE_TABS: DeviceManagementTabId[] = [
   'overview',
   'apps',
   'kiosk',
   'tethering',
+  'install_policy',
+  'location',
+  'actions',
   'history',
 ];
 
@@ -89,6 +107,24 @@ export function parseRouteFromHash(hashStr: string): AppRouteState {
       deviceTab: 'overview',
       settingsSection: 'general',
       hash: '#/apps',
+    };
+  }
+  if (cleaned === 'company_apps') {
+    return {
+      tab: 'company_apps',
+      deviceUid: null,
+      deviceTab: 'overview',
+      settingsSection: 'general',
+      hash: '#/company_apps',
+    };
+  }
+  if (cleaned === 'locations') {
+    return {
+      tab: 'locations',
+      deviceUid: null,
+      deviceTab: 'overview',
+      settingsSection: 'general',
+      hash: '#/locations',
     };
   }
   if (cleaned === 'audit') {

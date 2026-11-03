@@ -101,10 +101,17 @@ final class KioskController {
         }
 
         Set<String> list=new TreeSet<>(policy.apps);list.add(c.getPackageName());
-        // Journal which restrictions belong to this feature; never clear unrelated existing restrictions.
-        Set<String> owned=new HashSet<>(p.getStringSet("owned_restrictions",Collections.emptySet()));
-        for(String r:RESTRICTIONS)if(!d.getUserRestrictions(a).getBoolean(r))owned.add(r);
-        requireSave(p.edit().putStringSet("owned_restrictions",owned).putBoolean("managed",true).commit());
+        // Migrate legacy kiosk restrictions and apply required restrictions via unified RestrictionManager
+        RestrictionManager.migrateLegacyKioskRestrictions(c);
+        boolean blockInstalls = AppInstallPolicy.getLocal(c).blockAppInstalls;
+        boolean blockTether = d.getUserRestrictions(a).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING);
+        boolean blockLoc = LocationPolicy.getLocal(c).enabled;
+        Set<String> required = RestrictionManager.computeRequiredRestrictions(c, true, blockInstalls, blockTether, blockLoc);
+        RestrictionManager.reconcile(c, required);
+
+        Set<String> owned = new HashSet<>(RestrictionManager.getOwnedRestrictions(c));
+        requireSave(p.edit().putStringSet("owned_restrictions", owned).putBoolean("managed", true).commit());
+
         // Make local password recovery reachable before any OS restriction can fail.
         if (c.getPackageManager().getComponentEnabledSetting(new ComponentName(c,KioskActivity.class)) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
             c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
@@ -113,7 +120,6 @@ final class KioskController {
         if(Build.VERSION.SDK_INT>=30)d.setLockTaskFeatures(a,DevicePolicyManager.LOCK_TASK_FEATURE_HOME
                 |DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO|DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
                 |DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS|DevicePolicyManager.LOCK_TASK_FEATURE_BLOCK_ACTIVITY_START_IN_TASK);
-        for(String r:RESTRICTIONS)d.addUserRestriction(a,r);
         d.addPersistentPreferredActivity(a,homeFilter(),new ComponentName(c,KioskActivity.class));
         if (!new HashSet<>(Arrays.asList(d.getLockTaskPackages(a))).equals(list)) throw new IllegalStateException("تعذر تأكيد التطبيقات المسموحة");
         for(String r:RESTRICTIONS) if(!d.getUserRestrictions(a).getBoolean(r)) throw new IllegalStateException("تعذر تأكيد قيد شاشة الشركة: "+r);
@@ -130,15 +136,20 @@ final class KioskController {
         List<String> errors=new ArrayList<>();
         try { d.setLockTaskPackages(a,new String[0]); } catch(RuntimeException ex) { errors.add(errorText(ex)); }
         try { d.clearPackagePersistentPreferredActivities(a,c.getPackageName()); } catch(RuntimeException ex) { errors.add(errorText(ex)); }
-        Set<String> remaining=new HashSet<>(p.getStringSet("owned_restrictions",Collections.emptySet()));
-        for(String r:new HashSet<>(remaining)) {
-            try {
-                if(clearHookForTest!=null)clearHookForTest.beforeClear(r);
-                d.clearUserRestriction(a,r);
-                if(d.getUserRestrictions(a).getBoolean(r))throw new IllegalStateException("تعذر إزالة القيد "+r);
-                remaining.remove(r);
-            }catch(RuntimeException ex){errors.add(r+": "+errorText(ex));}
+
+        // Reconcile via unified RestrictionManager with kiosk disabled; preserves independent install & tethering
+        try {
+            RestrictionManager.migrateLegacyKioskRestrictions(c);
+            boolean blockInstalls = AppInstallPolicy.getLocal(c).blockAppInstalls;
+            boolean blockTether = d.getUserRestrictions(a).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING);
+            boolean blockLoc = LocationPolicy.getLocal(c).enabled;
+            Set<String> required = RestrictionManager.computeRequiredRestrictions(c, false, blockInstalls, blockTether, blockLoc);
+            RestrictionManager.reconcile(c, required);
+        } catch (Exception ex) {
+            errors.add("restrictionReconcile: " + errorText(ex));
         }
+
+        Set<String> remaining = new HashSet<>(RestrictionManager.getOwnedRestrictions(c));
         requireSave(p.edit().putStringSet("owned_restrictions",remaining).commit());
         if(!errors.isEmpty())throw new IllegalStateException(String.join("; ",errors));
         c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_DISABLED,PackageManager.DONT_KILL_APP);

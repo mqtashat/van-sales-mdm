@@ -17,15 +17,20 @@ import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.DocumentSnapshot;
 import com.google.firebase.firestore.FieldValue;
-import com.google.firebase.firestore.FirebaseFirestore;
+import android.location.LocationManager;
+import android.Manifest;
+import com.google.firebase.firestore.QueryDocumentSnapshot;
+import com.google.firebase.firestore.QuerySnapshot;
 import com.google.firebase.firestore.Source;
+import com.google.firebase.firestore.FirebaseFirestore;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 final class SyncEngine {
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.4.1-pilot";
+    static final String AGENT_VERSION = "0.5.0-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -356,6 +361,11 @@ final class SyncEngine {
         // Server confirmed enrollment approval
         recordApprovalState(prefs, uid, true);
         FirebaseFirestore db = FirebaseFirestore.getInstance();
+        try {
+            PackageInstallManager.recoverPendingInstallTasks(context);
+        } catch (Exception ex) {
+            Log.w(TAG, "install_recovery_failed: " + ex.getMessage());
+        }
 
         DevicePolicyManager dpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
         ComponentName admin = new ComponentName(context, AdminReceiver.class);
@@ -427,10 +437,177 @@ final class SyncEngine {
             if (!kioskError.isEmpty()) Log.w(TAG, "kiosk_sync: " + kioskError);
             try { DeviceInventory.publish(context, db, uid); }
             catch (Exception inventoryError) { Log.w(TAG, "inventory_upload_failed", inventoryError); }
+
+            // 1. Sync AppInstallPolicy
+            try {
+                DocumentSnapshot installDoc = Tasks.await(
+                        db.collection("appInstallPolicies").document(uid).get(Source.SERVER),
+                        15,
+                        TimeUnit.SECONDS
+                );
+                if (installDoc != null && installDoc.exists()) {
+                    AppInstallPolicy installPolicy = AppInstallPolicy.parse(
+                            installDoc.getData(),
+                            AppInstallPolicy.getLocal(context).revision
+                    );
+                    AppInstallPolicy.saveLocal(context, installPolicy);
+                }
+            } catch (Exception ex) {
+                Log.w(TAG, "install_policy_sync_failed: " + ex.getMessage());
+            }
+
+            // 2. Sync LocationPolicy
+            try {
+                DocumentSnapshot locDoc = Tasks.await(
+                        db.collection("locationPolicies").document(uid).get(Source.SERVER),
+                        15,
+                        TimeUnit.SECONDS
+                );
+                if (locDoc != null && locDoc.exists()) {
+                    LocationPolicy locPolicy = LocationPolicy.parse(
+                            locDoc.getData(),
+                            LocationPolicy.getLocal(context).revision
+                    );
+                    LocationPolicy.saveLocal(context, locPolicy);
+                }
+            } catch (Exception ex) {
+                Log.w(TAG, "location_policy_sync_failed: " + ex.getMessage());
+            }
+
+            // 3. Reconcile restrictions across all active features
+            try {
+                boolean kioskActive = KioskController.enabled(context) && !KioskController.inMaintenance(context);
+                boolean blockInstalls = AppInstallPolicy.getLocal(context).blockAppInstalls;
+                boolean blockTether = dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING);
+                LocationPolicy currentLoc = LocationPolicy.getLocal(context);
+                boolean blockLocConfig = currentLoc.enabled;
+
+                if (currentLoc.enabled) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            dpm.setLocationEnabled(admin, true);
+                        } catch (Exception e) {
+                            Log.w(TAG, "setLocationEnabled failed: " + e.getMessage());
+                        }
+                    }
+                    try {
+                        dpm.setPermissionGrantState(admin, context.getPackageName(), Manifest.permission.ACCESS_FINE_LOCATION, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
+                        dpm.setPermissionGrantState(admin, context.getPackageName(), Manifest.permission.ACCESS_COARSE_LOCATION, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            dpm.setPermissionGrantState(admin, context.getPackageName(), Manifest.permission.ACCESS_BACKGROUND_LOCATION, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "grantLocationPermissions failed: " + e.getMessage());
+                    }
+                    PolicyLocationService.startIfPolicyEnabled(context);
+                } else {
+                    PolicyLocationService.stopService(context);
+                }
+
+                Set<String> required = RestrictionManager.computeRequiredRestrictions(
+                        context,
+                        kioskActive,
+                        blockInstalls,
+                        blockTether,
+                        blockLocConfig
+                );
+                RestrictionManager.reconcile(context, required);
+            } catch (Exception ex) {
+                Log.w(TAG, "restriction_reconcile_failed: " + ex.getMessage());
+            }
+
+            // 4. Drain queued location points
+            try {
+                LocationQueue.drainToFirestore(context, db, uid, 25);
+            } catch (Exception ex) {
+                Log.w(TAG, "location_queue_drain_failed: " + ex.getMessage());
+            }
+
+            // 5. Process pending deviceCommands
+            try {
+                QuerySnapshot cmdSnap = Tasks.await(
+                        db.collection("deviceCommands").document(uid).collection("commands")
+                                .whereEqualTo("status", "pending")
+                                .get(Source.SERVER),
+                        15,
+                        TimeUnit.SECONDS
+                );
+                if (cmdSnap != null && !cmdSnap.isEmpty()) {
+                    for (QueryDocumentSnapshot cmdDoc : cmdSnap) {
+                        String type = cmdDoc.getString("type");
+                        String cmdId = cmdDoc.getId();
+                        if ("install_app".equals(type)) {
+                            if (Boolean.TRUE.equals(cmdDoc.getBoolean("cancelled"))) {
+                                continue;
+                            }
+                            String appId = cmdDoc.getString("app_id");
+                            String pkg = cmdDoc.getString("package_name");
+                            String url = cmdDoc.getString("download_url");
+                            String storagePath = cmdDoc.getString("storage_path");
+                            long ver = cmdDoc.getLong("version_code") != null ? cmdDoc.getLong("version_code") : 1L;
+                            String shaApk = cmdDoc.getString("sha256_apk");
+                            String shaCert = cmdDoc.getString("sha256_cert");
+                            boolean addToKiosk = cmdDoc.getBoolean("add_to_kiosk") != null ? cmdDoc.getBoolean("add_to_kiosk") : false;
+                            String expiresAtStr = cmdDoc.getString("expires_at");
+                            long expiresAtMs = 0L;
+                            if (expiresAtStr != null && !expiresAtStr.isEmpty()) {
+                                try {
+                                    expiresAtMs = java.time.Instant.parse(expiresAtStr).toEpochMilli();
+                                } catch (Exception ignored) {}
+                            }
+
+                            if (expiresAtMs > 0 && System.currentTimeMillis() > expiresAtMs) {
+                                db.collection("deviceCommands").document(uid).collection("commands").document(cmdId)
+                                        .update("status", "failed", "completed_at", FieldValue.serverTimestamp(),
+                                                "error", "انتهت صلاحية أمر التثبيت (24 ساعة)");
+                                continue;
+                            }
+
+                            // Mark started
+                            db.collection("deviceCommands").document(uid).collection("commands").document(cmdId)
+                                    .update("status", "in_progress", "started_at", FieldValue.serverTimestamp());
+
+                            boolean hasDownloadSource = (storagePath != null && !storagePath.trim().isEmpty())
+                                    || (url != null && !url.trim().isEmpty());
+                            if (pkg != null && hasDownloadSource && shaApk != null) {
+                                PackageInstallManager.downloadAndInstall(context, url, storagePath, appId, pkg, (int) ver, shaApk, shaCert, cmdId, uid, expiresAtMs, addToKiosk, new PackageInstallManager.InstallCallback() {
+                                    @Override
+                                    public void onProgress(String status) {
+                                        db.collection("deviceCommands").document(uid).collection("commands").document(cmdId)
+                                                .update("progress", status);
+                                    }
+                                    @Override
+                                    public void onSuccess(String packageName, int versionCode) {}
+                                    @Override
+                                    public void onFailure(String err) {
+                                        db.collection("deviceCommands").document(uid).collection("commands").document(cmdId)
+                                                .update("status", "failed", "completed_at", FieldValue.serverTimestamp(), "error", err);
+                                    }
+                                });
+                            }
+                        } else if ("refresh_location".equals(type)) {
+                            PolicyLocationService.startIfPolicyEnabled(context);
+                            db.collection("deviceCommands").document(uid).collection("commands").document(cmdId)
+                                    .update("status", "executed", "completed_at", FieldValue.serverTimestamp());
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                Log.w(TAG, "device_commands_sync_failed: " + ex.getMessage());
+            }
         }
 
         Map<String, Object> state = new HashMap<>();
         state.put("device_owner", owner);
+        state.put("device_owner_protected", owner);
+        state.put("deprovisioned", DeprovisionController.isDeprovisioned(context));
+        state.put("block_app_installs", AppInstallPolicy.getLocal(context).blockAppInstalls);
+        boolean locPolicyEnabled = LocationPolicy.getLocal(context).enabled;
+        state.put("location_policy_enabled", locPolicyEnabled);
+        LocationManager lm = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        boolean locSwitch = lm != null && lm.isLocationEnabled();
+        state.put("location_switch_on", locSwitch);
+        state.put("location_service_running", PolicyLocationService.isServiceRunning());
         state.put("applied_revision", applied);
         state.put("tethering_restricted", owner && dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_CONFIG_TETHERING));
         state.put("last_seen", FieldValue.serverTimestamp());

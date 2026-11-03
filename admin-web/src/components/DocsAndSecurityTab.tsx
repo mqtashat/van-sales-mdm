@@ -100,10 +100,9 @@ service cloud.firestore {
         && data.updated_by_email is string && data.updated_by_email == request.auth.token.email
         && (!('archived' in data) || (
           data.archived is bool
-          && ((request.method == 'update' && !data.diff(resource.data).affectedKeys().hasAny(['archived', 'archived_at', 'archived_by_uid', 'archived_by_email'])) || (
-          (!('archived_at' in data) || data.archived_at == null || data.archived_at == request.time)
+          && (!('archived_at' in data) || data.archived_at == null || data.archived_at == request.time)
           && (!('archived_by_uid' in data) || data.archived_by_uid == null || (data.archived_by_uid is string && data.archived_by_uid == request.auth.uid))
-          && (!('archived_by_email' in data) || data.archived_by_email == null || (data.archived_by_email is string && data.archived_by_email == request.auth.token.email))))
+          && (!('archived_by_email' in data) || data.archived_by_email == null || (data.archived_by_email is string && data.archived_by_email == request.auth.token.email))
         ));
     }
 

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import type { Firestore } from 'firebase/firestore';
 import {
   MergedDeviceRecord,
@@ -11,6 +11,7 @@ import {
   EnforcementBadge,
 } from './StatusBadges';
 import { DeviceDetailDrawer } from './DeviceDetailDrawer';
+import type { DeviceManagementTabId } from '../utils/navigationGuard';
 import { BulkActionModal } from './BulkActionModal';
 import {
   sanitizeManualUid,
@@ -52,8 +53,8 @@ interface DevicesTabProps {
   actor: AdminIdentity;
   selectedDeviceUid: string | null;
   onSelectDeviceUid: (uid: string | null) => void;
-  deviceTab?: 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history';
-  onDeviceTabChange?: (tab: 'overview' | 'apps' | 'kiosk' | 'tethering' | 'history') => void;
+  deviceTab?: DeviceManagementTabId;
+  onDeviceTabChange?: (tab: DeviceManagementTabId) => void;
   discardDraftSignal?: number;
   searchQuery?: string;
   onSearchQueryChange?: (q: string) => void;
@@ -117,13 +118,6 @@ export const DevicesTab: React.FC<DevicesTabProps> = ({
 
   const activeDevices = useMemo(() => devices.filter((d) => !d.isArchived), [devices]);
   const archivedDevices = useMemo(() => devices.filter((d) => d.isArchived), [devices]);
-  useEffect(() => {
-    const eligible = new Set(activeDevices.map(d => d.uid));
-    setSelectedUids(previous => {
-      const next = new Set([...previous].filter(uid => eligible.has(uid)));
-      return next.size === previous.size ? previous : next;
-    });
-  }, [activeDevices]);
 
   const counts = useMemo(() => {
     return {
@@ -737,8 +731,8 @@ export const DevicesTab: React.FC<DevicesTabProps> = ({
         <BulkActionModal
           isOpen={true}
           onClose={() => setBulkModalConfig(null)}
-          devices={activeDevices}
-          selectedUids={Array.from(selectedUids).filter(uid => activeDevices.some(d => d.uid === uid))}
+          devices={devices}
+          selectedUids={Array.from(selectedUids)}
           actionType={bulkModalConfig.actionType}
           actionParams={bulkModalConfig.actionParams}
           db={db}

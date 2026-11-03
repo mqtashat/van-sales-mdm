@@ -10,7 +10,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:contract": "node --import tsx --test tests/contract.test.mjs",
-    "test:rules": "firebase emulators:exec --only firestore --project demo-mdm \"node --test tests/rules.test.mjs\""
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-mdm \"node --test tests/rules.test.mjs\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -19,6 +19,8 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "firebase": "^13.1.0",
+    "jszip": "^3.10.2",
+    "leaflet": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",
@@ -28,6 +30,8 @@
   "devDependencies": {
     "@firebase/rules-unit-testing": "^6.0.0",
     "@types/express": "^4.17.21",
+    "@types/jszip": "^3.4.0",
+    "@types/leaflet": "^1.9.22",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

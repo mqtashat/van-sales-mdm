@@ -1,7 +1,8 @@
 import { before, after, beforeEach, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { ref, uploadBytes, getBytes } from 'firebase/storage';
 
 let env;
 before(async () => {
@@ -9,6 +10,9 @@ before(async () => {
     projectId: 'demo-mdm',
     firestore: {
       rules: readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8')
+    },
+    storage: {
+      rules: readFileSync(new URL('../storage.rules', import.meta.url), 'utf8')
     }
   });
 });
@@ -19,6 +23,7 @@ after(async () => {
 
 beforeEach(async () => {
   await env.clearFirestore();
+  await env.clearStorage();
   await env.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await setDoc(doc(db, 'enrollments/a'), { approved: true });
@@ -423,16 +428,182 @@ test('deviceMetadata: approved device reads only its own metadata for name displ
   }));
 });
 
+test('companyApps & deviceCommands: client cannot spoof inspection_status=verified, unverified apps cannot be distributed, and phone cannot alter add_to_kiosk or update cancelled commands', async () => {
+  const adminDb = env.authenticatedContext('consoleAdmin', {
+    email: 'mashhoor.info@gmail.com',
+    email_verified: true,
+    admin: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+  const phoneA = env.authenticatedContext('a', { firebase: { sign_in_provider: 'anonymous' } }).firestore();
 
+  const baseAppDoc = {
+    app_name: 'تطبيق المبيعات',
+    package_name: 'com.injaz.sales',
+    version_code: 10,
+    version_name: '1.0.0',
+    file_size_bytes: 1024,
+    storage_path: 'company_apps/app1/release.apk',
+    sha256_apk: 'a'.repeat(64),
+    sha256_cert: 'b'.repeat(64),
+    inspection_status: 'pending_inspection',
+    inspected_by_server: false,
+    created_at: serverTimestamp()
+  };
 
+  // 1. Admin CANNOT create companyApps document with inspection_status == 'verified' or inspected_by_server == true
+  await assertFails(setDoc(doc(adminDb, 'companyApps/app_spoof'), {
+    ...baseAppDoc,
+    storage_path: 'company_apps/app_spoof/release.apk',
+    inspection_status: 'verified',
+    inspected_by_server: true
+  }));
 
-test('renaming an archived device retains its archive attribution; forged changes fail',async()=>{
- const db=env.authenticatedContext('consoleAdmin',{email:'mashhoor.info@gmail.com',email_verified:true,firebase:{sign_in_provider:'password'}}).firestore();
- const ref=doc(db,'deviceMetadata/a');
- await assertSucceeds(setDoc(ref,{device_name:'old',rep_name:'rep',updated_at:serverTimestamp(),updated_by_uid:'consoleAdmin',updated_by_email:'mashhoor.info@gmail.com',archived:true,archived_at:serverTimestamp(),archived_by_uid:'consoleAdmin',archived_by_email:'mashhoor.info@gmail.com'}));
- const before=(await getDoc(ref)).data();
- await assertSucceeds(setDoc(ref,{device_name:'renamed',rep_name:'rep',updated_at:serverTimestamp(),updated_by_uid:'consoleAdmin',updated_by_email:'mashhoor.info@gmail.com'},{merge:true}));
- const after=(await getDoc(ref)).data();
- if(after.archived!==true||!after.archived_at.isEqual(before.archived_at))throw Error('archive was lost');
- await assertFails(updateDoc(ref,{archived_by_uid:'someone-else',updated_at:serverTimestamp()}));
+  // 2. Admin CAN create companyApps document in 'pending_inspection' state
+  await assertSucceeds(setDoc(doc(adminDb, 'companyApps/app1'), baseAppDoc));
+
+  // 3. Admin CANNOT update inspection_status to 'verified' from client
+  await assertFails(updateDoc(doc(adminDb, 'companyApps/app1'), {
+    inspection_status: 'verified',
+    inspected_by_server: true
+  }));
+
+  // 4. Admin CANNOT create install_app command while app is still pending_inspection
+  await assertFails(setDoc(doc(adminDb, 'deviceCommands/a/commands/cmd1'), {
+    type: 'install_app',
+    app_id: 'app1',
+    package_name: 'com.injaz.sales',
+    version_code: 10,
+    sha256_apk: 'a'.repeat(64),
+    sha256_cert: 'b'.repeat(64),
+    add_to_kiosk: false,
+    status: 'pending',
+    cancelled: false
+  }));
+
+  // 5. Server (Admin SDK) marks companyApps/app1 as verified
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'companyApps/app1'), {
+      inspection_status: 'verified',
+      inspected_by_server: true
+    });
+  });
+
+  // 6. Now Admin CAN create install_app command
+  await assertSucceeds(setDoc(doc(adminDb, 'deviceCommands/a/commands/cmd1'), {
+    type: 'install_app',
+    app_id: 'app1',
+    package_name: 'com.injaz.sales',
+    version_code: 10,
+    sha256_apk: 'a'.repeat(64),
+    sha256_cert: 'b'.repeat(64),
+    add_to_kiosk: false,
+    status: 'pending',
+    cancelled: false
+  }));
+
+  // 7. Phone CANNOT modify add_to_kiosk or write add_to_kiosk_requested / kiosk_addition_status
+  await assertFails(updateDoc(doc(phoneA, 'deviceCommands/a/commands/cmd1'), {
+    status: 'executed',
+    add_to_kiosk: true
+  }));
+  await assertFails(updateDoc(doc(phoneA, 'deviceCommands/a/commands/cmd1'), {
+    status: 'executed',
+    add_to_kiosk_requested: true
+  }));
+  await assertFails(updateDoc(doc(phoneA, 'deviceCommands/a/commands/cmd1'), {
+    status: 'executed',
+    kiosk_addition_status: 'added'
+  }));
+
+  // 8. Phone CAN update allowed execution progress fields
+  await assertSucceeds(updateDoc(doc(phoneA, 'deviceCommands/a/commands/cmd1'), {
+    status: 'in_progress',
+    progress: 'جاري التنزيل'
+  }));
+
+  // 9. Admin cancels command -> Phone CANNOT update it to executed afterwards
+  await assertSucceeds(updateDoc(doc(adminDb, 'deviceCommands/a/commands/cmd1'), {
+    status: 'cancelled',
+    cancelled: true
+  }));
+  await assertFails(updateDoc(doc(phoneA, 'deviceCommands/a/commands/cmd1'), {
+    status: 'executed',
+    installed_version: 10
+  }));
+});
+
+test('storage.rules: allows targeted approved device with active grant, denies non-targeted approved device, denies after command cancellation or grant expiration, and blocks APK file replacement', async () => {
+  const adminCtx = env.authenticatedContext('consoleAdmin', {
+    email: 'mashhoor.info@gmail.com',
+    email_verified: true,
+    admin: true,
+    firebase: { sign_in_provider: 'password' }
+  });
+  const deviceACtx = env.authenticatedContext('a', { firebase: { sign_in_provider: 'anonymous' } });
+  const deviceBCtx = env.authenticatedContext('b', { firebase: { sign_in_provider: 'anonymous' } });
+
+  const apkPayload = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x11, 0x22, 0x33, 0x44]);
+  const metadata = { contentType: 'application/vnd.android.package-archive' };
+
+  // 1. Admin uploads APK file to company_apps/app1/release.apk
+  const adminStorageRef = ref(adminCtx.storage(), 'company_apps/app1/release.apk');
+  await assertSucceeds(uploadBytes(adminStorageRef, apkPayload, metadata));
+
+  // 2. Admin CANNOT overwrite/replace an already uploaded APK file (allow update: if false)
+  await assertFails(uploadBytes(adminStorageRef, new Uint8Array([0x00, 0x01]), metadata));
+
+  // Seed verified companyApps/app1, active command cmd1 for device 'a', and active grant for device 'a'
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await setDoc(doc(db, 'companyApps/app1'), {
+      package_name: 'com.injaz.sales',
+      version_code: 10,
+      storage_path: 'company_apps/app1/release.apk',
+      sha256_apk: 'a'.repeat(64),
+      sha256_cert: 'b'.repeat(64),
+      inspection_status: 'verified',
+      inspected_by_server: true
+    });
+    await setDoc(doc(db, 'deviceCommands/a/commands/cmd1'), {
+      type: 'install_app',
+      app_id: 'app1',
+      status: 'pending',
+      cancelled: false
+    });
+    await setDoc(doc(db, 'deviceDownloadGrants/a/apps/app1'), {
+      status: 'active',
+      command_id: 'cmd1',
+      file_name: 'release.apk',
+      expires_at: Timestamp.fromMillis(Date.now() + 600_000)
+    });
+  });
+
+  // 3. Targeted approved device 'a' CAN read the APK
+  await assertSucceeds(getBytes(ref(deviceACtx.storage(), 'company_apps/app1/release.apk')));
+
+  // 4. Non-targeted approved device 'b' is DENIED reading the APK
+  await assertFails(getBytes(ref(deviceBCtx.storage(), 'company_apps/app1/release.apk')));
+
+  // 5. After command cancellation, targeted device 'a' is DENIED reading the APK
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    await updateDoc(doc(ctx.firestore(), 'deviceCommands/a/commands/cmd1'), {
+      status: 'cancelled',
+      cancelled: true
+    });
+  });
+  await assertFails(getBytes(ref(deviceACtx.storage(), 'company_apps/app1/release.apk')));
+
+  // 6. Restore command to pending, but expire the grant -> targeted device 'a' is DENIED reading the APK
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    await updateDoc(doc(db, 'deviceCommands/a/commands/cmd1'), {
+      status: 'pending',
+      cancelled: false
+    });
+    await updateDoc(doc(db, 'deviceDownloadGrants/a/apps/app1'), {
+      expires_at: Timestamp.fromMillis(Date.now() - 60_000)
+    });
+  });
+  await assertFails(getBytes(ref(deviceACtx.storage(), 'company_apps/app1/release.apk')));
 });

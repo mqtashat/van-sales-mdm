@@ -1888,3 +1888,867 @@ test('25. Phone kiosk exit maintenance contract re-enforces local valid policy w
   );
 });
 
+test('26. Independent AppInstallPolicy and LocationPolicy increment revision, enforce schema_version 1, and write audit logs', async () => {
+  // Test simulated install policy transaction
+  let installRevision = 1;
+  const mockTx = {
+    records: new Map(),
+    get(ref) {
+      return {
+        exists: () => this.records.has(ref),
+        data: () => this.records.get(ref),
+      };
+    },
+    set(ref, data) {
+      this.records.set(ref, data);
+    },
+  };
+
+  const actor = { uid: 'admin_test_1', email: 'admin@company.com' };
+  const uid = 'device_test_123';
+
+  // 1. First save creates revision 1
+  const policyRef = `appInstallPolicies/${uid}`;
+  const auditRef = 'auditLogs/log_1';
+
+  let snap = mockTx.get(policyRef);
+  let nextRev = snap.exists() ? snap.data().revision + 1 : 1;
+  assert.equal(nextRev, 1);
+  mockTx.set(policyRef, {
+    schema_version: 1,
+    revision: nextRev,
+    block_app_installs: true,
+    updated_by_uid: actor.uid,
+  });
+  mockTx.set(auditRef, {
+    actor_uid: actor.uid,
+    action: 'update_install_policy',
+    target_uid: uid,
+  });
+
+  assert.equal(mockTx.records.get(policyRef).revision, 1);
+  assert.equal(mockTx.records.get(policyRef).block_app_installs, true);
+
+  // 2. Subsequent save increments revision to 2
+  snap = mockTx.get(policyRef);
+  nextRev = snap.exists() ? snap.data().revision + 1 : 1;
+  assert.equal(nextRev, 2);
+  mockTx.set(policyRef, {
+    schema_version: 1,
+    revision: nextRev,
+    block_app_installs: false,
+    updated_by_uid: actor.uid,
+  });
+  assert.equal(mockTx.records.get(policyRef).revision, 2);
+  assert.equal(mockTx.records.get(policyRef).block_app_installs, false);
+
+  // 3. Location Policy validates schedule bounds and intervals
+  const locPolicy = {
+    schema_version: 1,
+    revision: 1,
+    enabled: true,
+    mode: 'work_hours',
+    start_time: '08:00',
+    end_time: '18:00',
+    work_days: [1, 2, 3, 4, 5],
+    sampling_interval_seconds: 120,
+  };
+  assert.equal(locPolicy.schema_version, 1);
+  assert.ok(locPolicy.sampling_interval_seconds >= 30 && locPolicy.sampling_interval_seconds <= 3600);
+});
+
+test('27. Authorized Deprovisioning issues remote command and audit record without data wipe or destructive payload', () => {
+  const actor = { uid: 'admin_test_1', email: 'admin@company.com' };
+  const uid = 'device_deprovision_test';
+  const reason = 'انتهاء فترة عمل المندوب وتسليم الجهاز';
+
+  const commandDoc = {
+    type: 'deprovision',
+    status: 'pending',
+    reason,
+    created_by_uid: actor.uid,
+    created_by_email: actor.email,
+  };
+
+  const auditDoc = {
+    actor_uid: actor.uid,
+    actor_email: actor.email,
+    target_uid: uid,
+    action: 'deprovision_device',
+    summary: `طلب إنهاء إدارة مسؤول الجهاز (Device Owner) المصرّح: ${reason}`,
+    after: { deprovision_requested: true, reason },
+  };
+
+  assert.equal(commandDoc.type, 'deprovision');
+  assert.equal(commandDoc.status, 'pending');
+  assert.equal(auditDoc.action, 'deprovision_device');
+  assert.equal(auditDoc.target_uid, uid);
+  // Ensure NO wipe or factory reset key exists
+  assert.equal('wipe' in commandDoc, false);
+  assert.equal('factory_reset' in commandDoc, false);
+});
+
+// Helper to construct binary AndroidManifest.xml (AXML) buffer for testing parseBinaryAndroidManifest & parseApkFile
+function buildTestBinaryAxml({ pkg, versionCode, versionName, appLabel }) {
+  const strings = ['manifest', 'package', 'versionCode', 'versionName', 'application', 'label', pkg || '', versionName || '', appLabel || ''];
+  // Build UTF-16LE string pool chunk (type 0x001c0001)
+  const strBuffers = strings.map((s) => {
+    const buf = new ArrayBuffer(2 + s.length * 2 + 2);
+    const view = new DataView(buf);
+    view.setUint16(0, s.length, true);
+    for (let i = 0; i < s.length; i++) {
+      view.setUint16(2 + i * 2, s.charCodeAt(i), true);
+    }
+    view.setUint16(2 + s.length * 2, 0, true);
+    return new Uint8Array(buf);
+  });
+
+  const offsets = [];
+  let currentOffset = 0;
+  for (const b of strBuffers) {
+    offsets.push(currentOffset);
+    currentOffset += b.byteLength;
+  }
+  // Align string data to 4 bytes
+  const padBytes = (4 - (currentOffset % 4)) % 4;
+  const stringsStart = 28 + strings.length * 4;
+  const spChunkSize = stringsStart + currentOffset + padBytes;
+
+  // Manifest StartElement chunk (type 0x00100102)
+  // 3 attributes: package (idx 1), versionCode (idx 2), versionName (idx 3)
+  const attrCount = (pkg ? 1 : 0) + (versionCode !== undefined ? 1 : 0) + (versionName ? 1 : 0);
+  const elemChunkSize = 36 + attrCount * 20;
+
+  const totalSize = 8 + spChunkSize + elemChunkSize;
+  const out = new ArrayBuffer(totalSize);
+  const view = new DataView(out);
+  const bytes = new Uint8Array(out);
+
+  // AXML Header
+  view.setUint32(0, 0x00080003, true);
+  view.setUint32(4, totalSize, true);
+
+  // String Pool Header
+  let pos = 8;
+  view.setUint32(pos, 0x001c0001, true);
+  view.setUint32(pos + 4, spChunkSize, true);
+  view.setUint32(pos + 8, strings.length, true); // stringCount
+  view.setUint32(pos + 12, 0, true); // styleCount
+  view.setUint32(pos + 16, 0, true); // flags (0 = UTF-16LE)
+  view.setUint32(pos + 20, stringsStart, true);
+  view.setUint32(pos + 24, 0, true);
+
+  for (let i = 0; i < offsets.length; i++) {
+    view.setUint32(pos + 28 + i * 4, offsets[i], true);
+  }
+
+  let sPos = pos + stringsStart;
+  for (const b of strBuffers) {
+    bytes.set(b, sPos);
+    sPos += b.byteLength;
+  }
+
+  // StartElement ('manifest' = index 0)
+  pos = 8 + spChunkSize;
+  view.setUint32(pos, 0x00100102, true);
+  view.setUint32(pos + 4, elemChunkSize, true);
+  view.setInt32(pos + 20, 0, true); // nameIdx = 0 ('manifest')
+  view.setUint16(pos + 24, 20, true); // attrStart
+  view.setUint16(pos + 26, 20, true); // attrSize
+  view.setUint16(pos + 28, attrCount, true);
+
+  let aIdx = 0;
+  if (pkg) {
+    const aOff = pos + 36 + aIdx * 20;
+    view.setInt32(aOff + 4, 1, true); // 'package'
+    view.setInt32(aOff + 8, 6, true); // rawValIdx = 6 (pkg)
+    view.setUint8(aOff + 15, 3); // string type
+    view.setInt32(aOff + 16, 6, true);
+    aIdx++;
+  }
+  if (versionCode !== undefined) {
+    const aOff = pos + 36 + aIdx * 20;
+    view.setInt32(aOff + 4, 2, true); // 'versionCode'
+    view.setInt32(aOff + 8, -1, true);
+    view.setUint8(aOff + 15, 0x10); // int type
+    view.setInt32(aOff + 16, versionCode, true);
+    aIdx++;
+  }
+  if (versionName) {
+    const aOff = pos + 36 + aIdx * 20;
+    view.setInt32(aOff + 4, 3, true); // 'versionName'
+    view.setInt32(aOff + 8, 7, true); // rawValIdx = 7 (versionName)
+    view.setUint8(aOff + 15, 3);
+    view.setInt32(aOff + 16, 7, true);
+    aIdx++;
+  }
+
+  return out;
+}
+
+// Helper to build a synthetic DER X.509 certificate with a specific payload for deterministic SHA-256 fingerprint
+function buildSyntheticX509Cert(seedByte = 0xaa) {
+  const innerLen = 140;
+  const totalLen = 4 + innerLen;
+  const cert = new Uint8Array(4 + totalLen);
+  cert[0] = 0x30;
+  cert[1] = 0x82;
+  cert[2] = (totalLen >> 8) & 0xff;
+  cert[3] = totalLen & 0xff;
+  // TBSCertificate SEQUENCE
+  cert[4] = 0x30;
+  cert[5] = 0x82;
+  cert[6] = (innerLen >> 8) & 0xff;
+  cert[7] = innerLen & 0xff;
+  // Version [0] EXPLICIT v3 (0xA0 0x03 0x02 0x01 0x02)
+  cert[8] = 0xa0;
+  cert[9] = 0x03;
+  cert[10] = 0x02;
+  cert[11] = 0x01;
+  cert[12] = 0x02;
+  for (let i = 13; i < cert.length; i++) {
+    cert[i] = (seedByte + i) & 0xff;
+  }
+  return cert;
+}
+
+// Injects an APK Signing Block (v2 or v3) with a real SHA-256 Merkle tree digest immediately before the ZIP Central Directory
+async function injectApkSigningBlock(zipBuffer, certBytes, schemeId = 0x7109871a) {
+  const { computeApkSigBlockV2MerkleSha256 } = await import('../src/utils/apkParser.ts');
+  const zipBytes = new Uint8Array(zipBuffer);
+  let eocdOffset = -1;
+  for (let i = zipBytes.length - 22; i >= 0; i--) {
+    if (
+      zipBytes[i] === 0x50 &&
+      zipBytes[i + 1] === 0x4b &&
+      zipBytes[i + 2] === 0x05 &&
+      zipBytes[i + 3] === 0x06
+    ) {
+      eocdOffset = i;
+      break;
+    }
+  }
+  assert.notEqual(eocdOffset, -1, 'Valid ZIP EOCD required');
+  const eocdView = new DataView(zipBuffer, eocdOffset);
+  const cdOffset = eocdView.getUint32(16, true);
+
+  // Compute real Merkle tree digest over the unsigned ZIP sections
+  const merkleDigest = await computeApkSigBlockV2MerkleSha256(
+    zipBytes,
+    cdOffset,
+    cdOffset,
+    eocdOffset
+  );
+
+  // Build digest record: [recordLen(4)=40][algoId(4)=0x0103][digestLen(4)=32][merkleDigest(32)]
+  const digestsLen = 4 + 4 + 4 + merkleDigest.length; // 44 bytes
+  const certsLen = 4 + certBytes.length;
+  const signedDataLen = 4 + digestsLen + 4 + certsLen;
+  const signerLen = 4 + signedDataLen;
+  const signersLen = 4 + signerLen;
+  const valueLen = 4 + signersLen;
+  const pairLen = 4 + valueLen; // ID (4) + value
+
+  // Block layout: [size8(8)][pairLen(8)][pairId(4)][value...][size8(8)][magic(16)]
+  const blockContentSize = 8 + pairLen + 8 + 16; // size excluding leading 8-byte length
+  const totalSigBlockBytes = 8 + blockContentSize;
+
+  const sigBlock = new ArrayBuffer(totalSigBlockBytes);
+  const sv = new DataView(sigBlock);
+  const sb = new Uint8Array(sigBlock);
+
+  sv.setUint32(0, blockContentSize, true); // leading uint64 low
+  sv.setUint32(4, 0, true);
+
+  // Pair
+  sv.setUint32(8, pairLen, true); // pair uint64 length low
+  sv.setUint32(12, 0, true);
+  sv.setUint32(16, schemeId, true); // 0x7109871a (v2) or 0xf05368c0 (v3)
+
+  // Signer payload at offset 20
+  sv.setUint32(20, signersLen, true);
+  sv.setUint32(24, signerLen, true);
+  sv.setUint32(28, signedDataLen, true);
+  sv.setUint32(32, digestsLen, true);
+  // Digest record at offset 36
+  sv.setUint32(36, 4 + 4 + merkleDigest.length, true); // singleDigestRecordLen = 40
+  sv.setUint32(40, 0x0103, true); // algoId = RSA PKCS#1 v1.5 with SHA-256
+  sv.setUint32(44, merkleDigest.length, true);
+  sb.set(merkleDigest, 48);
+
+  const certsPos = 36 + digestsLen;
+  sv.setUint32(certsPos, certsLen, true);
+  sv.setUint32(certsPos + 4, certBytes.length, true);
+  sb.set(certBytes, certsPos + 8);
+
+  const trailingOffset = 20 + valueLen;
+  sv.setUint32(trailingOffset, blockContentSize, true);
+  sv.setUint32(trailingOffset + 4, 0, true);
+
+  const magicStr = 'APK Sig Block 42';
+  for (let i = 0; i < 16; i++) {
+    sb[trailingOffset + 8 + i] = magicStr.charCodeAt(i);
+  }
+
+  // Splice into ZIP at cdOffset and update EOCD cdOffset
+  const out = new Uint8Array(zipBytes.length + totalSigBlockBytes);
+  out.set(zipBytes.slice(0, cdOffset), 0);
+  out.set(sb, cdOffset);
+  out.set(zipBytes.slice(cdOffset), cdOffset + totalSigBlockBytes);
+
+  const outView = new DataView(out.buffer);
+  const newEocdOffset = eocdOffset + totalSigBlockBytes;
+  outView.setUint32(newEocdOffset + 16, cdOffset + totalSigBlockBytes, true);
+
+  return out.buffer;
+}
+
+test('28. parseApkFile marks result as local preview only (isLocalPreviewOnly=true), verifies v1/v2/v3 signatures, and rejects tampered APKs that preserve certificate bytes', async () => {
+  const JSZip = (await import('jszip')).default;
+  const crypto = await import('node:crypto');
+  const { parseApkFile, computeSha256Hex, formatFingerprintWithColons } = await import('../src/utils/apkParser.ts');
+
+  const certA = buildSyntheticX509Cert(0x11);
+  const certB = buildSyntheticX509Cert(0x22);
+  const expectedCertAHex = await computeSha256Hex(certA.buffer, false);
+  const expectedCertBHex = await computeSha256Hex(certB.buffer, false);
+  assert.notEqual(expectedCertAHex, expectedCertBHex);
+  assert.equal(expectedCertAHex.length, 64);
+
+  const axml = buildTestBinaryAxml({
+    pkg: 'com.injaz.vansales.enterprise',
+    versionCode: 42,
+    versionName: '2.4.0-prod',
+  });
+
+  // 1. Test Scheme v2-only APK (no META-INF/*.RSA)
+  const zipV2 = new JSZip();
+  zipV2.file('AndroidManifest.xml', axml);
+  zipV2.file('classes.dex', new Uint8Array([0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x35, 0x00]));
+  const rawZipV2 = await zipV2.generateAsync({ type: 'arraybuffer' });
+  const apkV2Buffer = await injectApkSigningBlock(rawZipV2, certA, 0x7109871a);
+
+  const parsedV2 = await parseApkFile(apkV2Buffer);
+  assert.equal(parsedV2.isLocalPreviewOnly, true, 'Browser parser must strictly flag output as local preview only');
+  assert.equal('inspection_status' in parsedV2, false, 'Browser parser must never emit inspection_status');
+  assert.equal(parsedV2.packageName, 'com.injaz.vansales.enterprise');
+  assert.equal(parsedV2.versionCode, 42);
+  assert.equal(parsedV2.versionName, '2.4.0-prod');
+  assert.equal(parsedV2.signatureScheme, 'v2');
+  assert.equal(parsedV2.sha256Cert, expectedCertAHex);
+  assert.equal(parsedV2.sha256Cert.includes(':'), false, 'Stored cert hash must be raw hex without colons');
+  assert.equal(formatFingerprintWithColons(parsedV2.sha256Cert).split(':').length, 32);
+
+  // 2. Test TAMPERED v2 APK: modify classes.dex content while keeping the v2 Signing Block and X.509 certificate intact
+  const zipV2Tampered = new JSZip();
+  zipV2Tampered.file('AndroidManifest.xml', axml);
+  zipV2Tampered.file('classes.dex', new Uint8Array([0x64, 0x65, 0x78, 0x0a, 0xff, 0xff, 0xff, 0xff]));
+  const rawZipTampered = await zipV2Tampered.generateAsync({ type: 'arraybuffer' });
+
+  // Splice the original v2 signing block (with intact certA and original digest) into rawZipTampered
+  const origBytes = new Uint8Array(rawZipV2);
+  const origCdOffset = new DataView(rawZipV2, origBytes.length - 22).getUint32(16, true);
+  const signedBytes = new Uint8Array(apkV2Buffer);
+  const signedCdOffset = new DataView(apkV2Buffer, signedBytes.length - 22).getUint32(16, true);
+  const sigBlockSlice = signedBytes.slice(origCdOffset, signedCdOffset);
+
+  const tamperedZipBytes = new Uint8Array(rawZipTampered);
+  const tamperedApk = new Uint8Array(tamperedZipBytes.length + sigBlockSlice.length);
+  tamperedApk.set(tamperedZipBytes.slice(0, origCdOffset), 0);
+  tamperedApk.set(sigBlockSlice, origCdOffset);
+  tamperedApk.set(tamperedZipBytes.slice(origCdOffset), origCdOffset + sigBlockSlice.length);
+  new DataView(tamperedApk.buffer, tamperedApk.length - 22).setUint32(
+    16,
+    origCdOffset + sigBlockSlice.length,
+    true
+  );
+
+  await assert.rejects(
+    async () => parseApkFile(tamperedApk.buffer),
+    /فشل التحقق الجنائي من سلامة محتوى APK/,
+    'Tampered v2 APK with preserved certificate bytes MUST be rejected'
+  );
+
+  // 3. Test Scheme v3 APK with different certificate (certB)
+  const apkV3Buffer = await injectApkSigningBlock(rawZipV2, certB, 0xf05368c0);
+  const parsedV3 = await parseApkFile(apkV3Buffer);
+  assert.equal(parsedV3.signatureScheme, 'v3');
+  assert.equal(parsedV3.sha256Cert, expectedCertBHex);
+
+  // 4. Reject synthetic v1 archive lacking META-INF/*.SF and lacking PKCS#7 SignedData structure
+  const dexV1 = new Uint8Array([0x64, 0x65, 0x78, 0x0a, 0x01, 0x02, 0x03, 0x04]);
+  const manifestMf = [
+    'Manifest-Version: 1.0',
+    '',
+    'Name: AndroidManifest.xml',
+    `SHA-256-Digest: ${crypto.createHash('sha256').update(Buffer.from(axml)).digest('base64')}`,
+    '',
+    'Name: classes.dex',
+    `SHA-256-Digest: ${crypto.createHash('sha256').update(Buffer.from(dexV1)).digest('base64')}`,
+    '',
+  ].join('\r\n');
+
+  const zipFakeV1NoSf = new JSZip();
+  zipFakeV1NoSf.file('AndroidManifest.xml', axml);
+  zipFakeV1NoSf.file('classes.dex', dexV1);
+  zipFakeV1NoSf.file('META-INF/MANIFEST.MF', manifestMf);
+  const pkcs7Wrapper = new Uint8Array(24 + certA.length);
+  pkcs7Wrapper.set(certA, 24);
+  zipFakeV1NoSf.file('META-INF/CERT.RSA', pkcs7Wrapper);
+  const fakeV1NoSfBuffer = await zipFakeV1NoSf.generateAsync({ type: 'arraybuffer' });
+  await assert.rejects(
+    async () => parseApkFile(fakeV1NoSfBuffer),
+    /META-INF\/\*\.SF/,
+    'Synthetic v1 archive without .SF must be rejected even in local preview'
+  );
+
+  // Also reject v1 archive that has .SF but lacks PKCS#7 SignedData OID in CERT.RSA
+  const sfContent = `Signature-Version: 1.0\r\nSHA-256-Digest-Manifest: ${crypto
+    .createHash('sha256')
+    .update(Buffer.from(manifestMf, 'utf8'))
+    .digest('base64')}\r\n\r\n`;
+  const zipFakeV1NoPkcs7 = new JSZip();
+  zipFakeV1NoPkcs7.file('AndroidManifest.xml', axml);
+  zipFakeV1NoPkcs7.file('classes.dex', dexV1);
+  zipFakeV1NoPkcs7.file('META-INF/MANIFEST.MF', manifestMf);
+  zipFakeV1NoPkcs7.file('META-INF/CERT.SF', sfContent);
+  zipFakeV1NoPkcs7.file('META-INF/CERT.RSA', pkcs7Wrapper);
+  const fakeV1NoPkcs7Buffer = await zipFakeV1NoPkcs7.generateAsync({ type: 'arraybuffer' });
+  await assert.rejects(
+    async () => parseApkFile(fakeV1NoPkcs7Buffer),
+    /PKCS#7 SignedData/,
+    'v1 archive with raw cert wrapper lacking PKCS#7 SignedData structure must be rejected'
+  );
+
+  // 5. Reject unsigned APK (no v2/v3 block and no META-INF signature) — never invent a fallback hash!
+  await assert.rejects(
+    async () => parseApkFile(rawZipV2),
+    /غير موقعة/,
+    'Unsigned APK must be rejected without generating surrogate hash'
+  );
+
+  // 6. Reject APK with missing versionCode in Manifest — never default to versionCode=1!
+  const badAxml = buildTestBinaryAxml({
+    pkg: 'com.injaz.bad',
+    versionCode: 0,
+    versionName: '1.0.0',
+  });
+  const zipBadVer = new JSZip();
+  zipBadVer.file('AndroidManifest.xml', badAxml);
+  const rawBadVer = await zipBadVer.generateAsync({ type: 'arraybuffer' });
+  const signedBadVer = await injectApkSigningBlock(rawBadVer, certA, 0x7109871a);
+  await assert.rejects(
+    async () => parseApkFile(signedBadVer),
+    /versionCode/,
+    'APK without valid versionCode must be rejected'
+  );
+
+  // 7. Reject corrupted non-ZIP bytes
+  const corruptedBuffer = new Uint8Array(256).fill(0xff).buffer;
+  await assert.rejects(async () => parseApkFile(corruptedBuffer), /فشل فتح ملف APK/);
+});
+
+test('29. Production sendInstallCommand strictly requires explicit server-verified status (inspection_status === "verified" && inspected_by_server === true) and blocks missing or pending status', async () => {
+  const { sendInstallCommand } = await import('../src/services/mdmService.ts');
+
+  const baseApp = {
+    id: 'app_unverified_1',
+    app_name: 'Enterprise App',
+    package_name: 'com.company.unverified',
+    version_code: 5,
+    version_name: '1.2.0',
+    file_size_bytes: 50000,
+    storage_path: 'company_apps/app_unverified_1/app.apk',
+    sha256_apk: 'a'.repeat(64),
+    sha256_cert: 'b'.repeat(64),
+    inspection_status: 'pending_inspection',
+    inspected_by_server: false,
+    created_at: null,
+    created_by_uid: 'admin_1',
+    created_by_email: 'admin@company.com',
+  };
+
+  // 1. Rejects pending_inspection
+  await assert.rejects(
+    async () =>
+      sendInstallCommand({}, 'device_1', baseApp, {
+        uid: 'admin_1',
+        email: 'admin@company.com',
+      }),
+    /بانتظار الفحص/,
+    'sendInstallCommand must block distribution of pending_inspection apps'
+  );
+
+  // 2. Rejects when inspection_status field is missing/undefined (even if sha256_cert is 64 hex chars!)
+  const missingStatusApp = { ...baseApp };
+  delete missingStatusApp.inspection_status;
+  await assert.rejects(
+    async () =>
+      sendInstallCommand({}, 'device_1', missingStatusApp, {
+        uid: 'admin_1',
+        email: 'admin@company.com',
+      }),
+    /بانتظار الفحص/,
+    'Missing inspection_status field must block distribution even when sha256_cert is 64 chars'
+  );
+
+  // 3. Rejects when inspection_status === "verified" but inspected_by_server !== true (client-spoofed status)
+  const clientSpoofedVerifiedApp = {
+    ...baseApp,
+    inspection_status: 'verified',
+    inspected_by_server: false,
+  };
+  await assert.rejects(
+    async () =>
+      sendInstallCommand({}, 'device_1', clientSpoofedVerifiedApp, {
+        uid: 'admin_1',
+        email: 'admin@company.com',
+      }),
+    /بانتظار الفحص/,
+    'Client-spoofed verified status without inspected_by_server===true must be blocked'
+  );
+
+  // 4. Rejects when sha256_cert is not 64 hex characters
+  const invalidCertApp = {
+    ...baseApp,
+    inspection_status: 'verified',
+    inspected_by_server: true,
+    sha256_cert: 'short_invalid_cert',
+  };
+  await assert.rejects(
+    async () =>
+      sendInstallCommand({}, 'device_1', invalidCertApp, {
+        uid: 'admin_1',
+        email: 'admin@company.com',
+      }),
+    /بصمة شهادة المطور SHA-256 إلزاميتان/,
+    'sendInstallCommand must reject apps without a 64-char hex certificate fingerprint'
+  );
+});
+
+test('30. Authoritative Kiosk addition validates server revision, blocked_apps conflict, and 50-app limit via validateAndBuildKioskTransaction', async () => {
+  const { validateAndBuildKioskTransaction } = await import('../src/components/KioskPanel.tsx');
+
+  const baseActor = {
+    uid: 'admin_1',
+    email: 'admin@company.com',
+    isAuthorizedAdmin: true,
+    emailVerified: true,
+    isAnonymous: false,
+  };
+
+  const existingKioskDoc = {
+    schema_version: 1,
+    revision: 4,
+    enabled: true,
+    allowed_apps: ['com.company.sales'],
+    exit_salt: 'a'.repeat(32),
+    exit_hash: 'b'.repeat(64),
+  };
+
+  const inventoryDoc = {
+    apps: [
+      { package_name: 'com.company.sales', has_launcher_icon: true, is_enabled: true, is_hidden_by_agent: false },
+      { package_name: 'com.company.NewApp', has_launcher_icon: true, is_enabled: true, is_hidden_by_agent: false },
+    ],
+  };
+
+  // 1. Valid addition increments server revision from 4 to 5 and produces audit log
+  const result = validateAndBuildKioskTransaction({
+    uid: 'dev_1',
+    actor: baseActor,
+    serverReadConfirmed: true,
+    expectedRevision: 4,
+    enabled: true,
+    allowedApps: ['com.company.sales', 'com.company.NewApp'],
+    credential: { exit_salt: existingKioskDoc.exit_salt, exit_hash: existingKioskDoc.exit_hash },
+    existingKioskDoc,
+    enrollmentDoc: { approved: true },
+    deviceStatusDoc: { device_owner: true, agent_version: '0.5.0-pilot', android_sdk: 33 },
+    policyDoc: { blocked_apps: [] },
+    inventoryDoc,
+  });
+
+  assert.equal(result.nextPolicy.revision, 5);
+  assert.deepEqual(result.nextPolicy.allowed_apps, ['com.company.NewApp', 'com.company.sales']);
+  assert.equal(result.auditLog.action, 'update_policy');
+
+  // 2. Rejects addition if the newly installed app is in blocked_apps
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        uid: 'dev_1',
+        actor: baseActor,
+        serverReadConfirmed: true,
+        expectedRevision: 4,
+        enabled: true,
+        allowedApps: ['com.company.sales', 'com.company.NewApp'],
+        credential: { exit_salt: existingKioskDoc.exit_salt, exit_hash: existingKioskDoc.exit_hash },
+        existingKioskDoc,
+        enrollmentDoc: { approved: true },
+        deviceStatusDoc: { device_owner: true, agent_version: '0.5.0-pilot', android_sdk: 33 },
+        policyDoc: { blocked_apps: ['com.company.NewApp'] },
+        inventoryDoc,
+      }),
+    /أزل التطبيق من الحظر أولًا/
+  );
+
+  // 3. Rejects addition if exceeding 50 apps limit
+  const fiftyOneApps = Array.from({ length: 51 }, (_, i) => `com.company.app${i}`);
+  assert.throws(
+    () =>
+      validateAndBuildKioskTransaction({
+        uid: 'dev_1',
+        actor: baseActor,
+        serverReadConfirmed: true,
+        expectedRevision: 4,
+        enabled: true,
+        allowedApps: fiftyOneApps,
+        credential: { exit_salt: existingKioskDoc.exit_salt, exit_hash: existingKioskDoc.exit_hash },
+        existingKioskDoc,
+        enrollmentDoc: { approved: true },
+        deviceStatusDoc: { device_owner: true, agent_version: '0.5.0-pilot', android_sdk: 33 },
+        policyDoc: { blocked_apps: [] },
+        inventoryDoc: {
+          apps: fiftyOneApps.map((pkg) => ({
+            package_name: pkg,
+            has_launcher_icon: true,
+            is_enabled: true,
+            is_hidden_by_agent: false,
+          })),
+        },
+      }),
+    /50/
+  );
+});
+
+test('31. Android install durability: synchronous commit before session.commit(), pre-commit server re-verification, durable local retry queue, active/failed session inspection, and distinct already_installed state', async () => {
+  const fs = await import('node:fs');
+  const readAndroidJava = (fileName) => {
+    const candidates = [
+      new URL(`../van-sales-mdm/app/src/main/java/com/company/mdmagent/${fileName}`, import.meta.url),
+      new URL(`../../app/src/main/java/com/company/mdmagent/${fileName}`, import.meta.url),
+      new URL(`../app/src/main/java/com/company/mdmagent/${fileName}`, import.meta.url),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8');
+    }
+    throw new Error(`Android source not found: ${fileName}`);
+  };
+
+  const pkgInstallerSrc = readAndroidJava('PackageInstallManager.java');
+  const receiverSrc = readAndroidJava('InstallStatusReceiver.java');
+  const locQueueSrc = readAndroidJava('LocationQueue.java');
+  const restrictionSrc = readAndroidJava('RestrictionManager.java');
+
+  // 1. Verify INSTALL_EXECUTOR is defined and SharedPreferences is imported
+  assert.match(pkgInstallerSrc, /import android\.content\.SharedPreferences;/);
+  assert.match(pkgInstallerSrc, /^\s*private static final ExecutorService INSTALL_EXECUTOR =/m);
+
+  // 2. Verify downloaded archive certificate is verified BEFORE session creation
+  const archiveCertIdx = pkgInstallerSrc.indexOf('extractArchiveSignerSha256(context, tempApk)');
+  const createSessionIdx = pkgInstallerSrc.indexOf('installer.createSession(params)');
+  assert.ok(archiveCertIdx > 0 && createSessionIdx > archiveCertIdx, 'Downloaded APK certificate must be verified before createSession');
+
+  // 3. Verify pre-commit server re-verification AND synchronous .commit() with boolean check BEFORE session.commit()
+  const fsyncIdx = pkgInstallerSrc.indexOf('session.fsync(out)');
+  const preCommitVerifyIdx = pkgInstallerSrc.lastIndexOf('verifyCommandStillActiveOnServer(context, uid, cmdId, expiresAtMs)');
+  const syncCommitIdx = pkgInstallerSrc.indexOf('.putString(taskKey + "_state", "COMMITTED")\n                        .commit()');
+  const stateSavedCheckIdx = pkgInstallerSrc.indexOf('if (!stateSaved)');
+  const sessionCommitIdx = pkgInstallerSrc.indexOf('session.commit(pendingIntent.getIntentSender())');
+
+  assert.ok(preCommitVerifyIdx > fsyncIdx, 'Must re-verify command expiration, cancellation, and device approval after streaming and right before session.commit()');
+  assert.ok(syncCommitIdx > preCommitVerifyIdx, 'Must persist COMMITTED task state synchronously via .commit() after pre-commit verification');
+  assert.ok(stateSavedCheckIdx > syncCommitIdx && sessionCommitIdx > stateSavedCheckIdx, 'Must verify .commit() boolean return value before calling session.commit()');
+
+  // 4. Verify durable local queue (RESULT_PENDING_ACK) only calls clearTask inside .addOnSuccessListener(...)
+  assert.match(pkgInstallerSrc, /RESULT_PENDING_ACK/);
+  assert.match(pkgInstallerSrc, /\.addOnSuccessListener\(unused -> \{[\s\S]*?clearTask\(p, prefix\);/);
+  assert.equal(receiverSrc.includes('PackageInstallManager.clearTask(p, taskKey);'), false, 'InstallStatusReceiver must not delete task before server acknowledgement');
+
+  // 5. Verify active & failed session recovery via installer.getMySessions() and installer.getSessionInfo(sessionId)
+  assert.match(pkgInstallerSrc, /installer\.getMySessions\(\)/);
+  assert.match(pkgInstallerSrc, /installer\.getSessionInfo\(sessionId\)/);
+  assert.match(pkgInstallerSrc, /sessionInfo\.isActive\(\)/);
+
+  // 6. Verify distinct "already_installed" («الإصدار المطلوب موجود مسبقًا») vs "installed_new_or_updated"
+  assert.match(pkgInstallerSrc, /OUTCOME_ALREADY_INSTALLED = "already_installed"/);
+  assert.match(pkgInstallerSrc, /الإصدار المطلوب موجود مسبقًا/);
+  assert.match(pkgInstallerSrc, /updatedSincePreInstall/);
+
+  // 7. Verify InstallStatusReceiver does NOT write add_to_kiosk_requested or kiosk_addition_status
+  assert.equal(receiverSrc.includes('add_to_kiosk_requested'), false, 'Phone must not write add_to_kiosk_requested');
+  assert.equal(receiverSrc.includes('kiosk_addition_status'), false, 'Phone must not write kiosk_addition_status');
+
+  // 8. Verify LocationQueue deduplicates already-committed points without SetOptions.merge()
+  assert.equal(locQueueSrc.includes('SetOptions.merge()'), false, 'LocationQueue must not use SetOptions.merge()');
+  assert.match(locQueueSrc, /alreadyCommittedIds\.contains\(p\.pointId\)/);
+
+  // 9. Verify RestrictionManager keeps DISALLOW_INSTALL_APPS enforced during admin install
+  assert.match(restrictionSrc, /UserManager\.DISALLOW_INSTALL_APPS/);
+  assert.equal(pkgInstallerSrc.includes('clearUserRestriction'), false, 'PackageInstallManager must never lift DISALLOW_INSTALL_APPS during install');
+
+  // 10. Verify download token protection, HTTPS + host allowlist, pre-signed URL token suppression, and redirect blocking
+  assert.match(pkgInstallerSrc, /conn\.setInstanceFollowRedirects\(false\)/);
+  assert.match(pkgInstallerSrc, /validateAndClassifyDownloadUrl/);
+  assert.match(pkgInstallerSrc, /verifyResponseNotRedirected/);
+  assert.match(pkgInstallerSrc, /!downloadTarget\.isSignedStorageUrl/);
+});
+
+test('32. Security rules evaluation: server-only inspection_status, unified admin authorization, task-bound Storage download grants, and phone command update restrictions', async () => {
+  const fs = await import('node:fs');
+  const firestoreRules = fs.readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
+  const storageRules = fs.readFileSync(new URL('../storage.rules', import.meta.url), 'utf8');
+
+  // 1. Verify storage.rules has NO hardcoded emails and unifies isAdmin() with firestore.rules
+  assert.equal(storageRules.includes('mashhoor.info@gmail.com'), false, 'storage.rules must not contain hardcoded test/admin emails');
+  assert.equal(storageRules.includes('admin@company.com'), false, 'storage.rules must not contain hardcoded test/admin emails');
+  assert.match(storageRules, /request\.auth\.token\.admin == true/);
+  assert.match(storageRules, /firestore\.get\(\/databases\/\(default\)\/documents\/admins\/\$\(request\.auth\.uid\)\)\.data\.active == true/);
+
+  // 2. Verify storage.rules enforces per-device task-bound download grant (hasValidDeviceDownloadGrant) and file immutability
+  assert.match(storageRules, /allow read: if isAdmin\(\) \|\| hasValidDeviceDownloadGrant\(appId, fileName\);/);
+  assert.match(storageRules, /allow create: if isAdmin\(\)\s+&& resource == null/);
+  assert.match(storageRules, /allow update: if false;/);
+
+  // 3. Semantic Evaluator for Storage Rules (`hasValidDeviceDownloadGrant(appId, fileName)`)
+  function evaluateStorageReadRule({ auth, appId, fileName, nowMs, firestoreDocs }) {
+    if (!auth || !auth.uid) return false;
+    const isAdmin =
+      auth.email_verified === true &&
+      (auth.admin === true || firestoreDocs[`admins/${auth.uid}`]?.active === true);
+    if (isAdmin) return true;
+
+    const isApprovedDevice =
+      firestoreDocs[`enrollments/${auth.uid}`]?.approved === true &&
+      firestoreDocs[`deviceStatus/${auth.uid}`]?.device_owner === true &&
+      firestoreDocs[`deviceStatus/${auth.uid}`]?.deprovisioned !== true;
+    if (!isApprovedDevice) return false;
+
+    const grant = firestoreDocs[`deviceDownloadGrants/${auth.uid}/apps/${appId}`];
+    if (!grant) return false;
+
+    const cmd = firestoreDocs[`deviceCommands/${auth.uid}/commands/${grant.command_id}`];
+    const app = firestoreDocs[`companyApps/${appId}`];
+    if (!cmd || !app) return false;
+
+    return (
+      grant.status === 'active' &&
+      grant.app_id === appId &&
+      grant.storage_path === `company_apps/${appId}/${fileName}` &&
+      grant.expires_at_ms > nowMs &&
+      app.inspection_status === 'verified' &&
+      app.inspected_by_server === true &&
+      app.storage_path === `company_apps/${appId}/${fileName}` &&
+      cmd.type === 'install_app' &&
+      cmd.app_id === appId &&
+      (cmd.status === 'pending' || cmd.status === 'in_progress') &&
+      cmd.cancelled !== true
+    );
+  }
+
+  const nowMs = Date.now();
+  const baseFirestoreState = {
+    'enrollments/device_target': { approved: true },
+    'deviceStatus/device_target': { device_owner: true, deprovisioned: false },
+    'enrollments/device_other': { approved: true },
+    'deviceStatus/device_other': { device_owner: true, deprovisioned: false },
+    'companyApps/app_10': {
+      inspection_status: 'verified',
+      inspected_by_server: true,
+      storage_path: 'company_apps/app_10/release.apk',
+    },
+    'deviceCommands/device_target/commands/cmd_10': {
+      type: 'install_app',
+      app_id: 'app_10',
+      status: 'pending',
+      cancelled: false,
+    },
+    'deviceDownloadGrants/device_target/apps/app_10': {
+      status: 'active',
+      app_id: 'app_10',
+      command_id: 'cmd_10',
+      storage_path: 'company_apps/app_10/release.apk',
+      expires_at_ms: nowMs + 600_000,
+    },
+  };
+
+  // Case A: Targeted approved device -> ALLOWED
+  assert.equal(
+    evaluateStorageReadRule({
+      auth: { uid: 'device_target' },
+      appId: 'app_10',
+      fileName: 'release.apk',
+      nowMs,
+      firestoreDocs: baseFirestoreState,
+    }),
+    true,
+    'Targeted approved device with active grant and pending command must be allowed to read APK'
+  );
+
+  // Case B: Non-targeted approved device (device_other) -> REJECTED
+  assert.equal(
+    evaluateStorageReadRule({
+      auth: { uid: 'device_other' },
+      appId: 'app_10',
+      fileName: 'release.apk',
+      nowMs,
+      firestoreDocs: baseFirestoreState,
+    }),
+    false,
+    'Approved device NOT targeted by a grant for this app must be rejected'
+  );
+
+  // Case C: Targeted device after command cancellation -> REJECTED
+  assert.equal(
+    evaluateStorageReadRule({
+      auth: { uid: 'device_target' },
+      appId: 'app_10',
+      fileName: 'release.apk',
+      nowMs,
+      firestoreDocs: {
+        ...baseFirestoreState,
+        'deviceCommands/device_target/commands/cmd_10': {
+          ...baseFirestoreState['deviceCommands/device_target/commands/cmd_10'],
+          status: 'cancelled',
+          cancelled: true,
+        },
+      },
+    }),
+    false,
+    'Targeted device must be rejected immediately after command cancellation'
+  );
+
+  // Case D: Targeted device after grant expiration -> REJECTED
+  assert.equal(
+    evaluateStorageReadRule({
+      auth: { uid: 'device_target' },
+      appId: 'app_10',
+      fileName: 'release.apk',
+      nowMs: nowMs + 900_000, // past expires_at_ms
+      firestoreDocs: baseFirestoreState,
+    }),
+    false,
+    'Targeted device must be rejected after grant expiration'
+  );
+
+  // 4. Semantic Evaluator for Firestore Rules:
+  // - Admin cannot write inspection_status == 'verified' or inspected_by_server == true on /companyApps/{appId}
+  assert.match(firestoreRules, /request\.resource\.data\.inspection_status == 'pending_inspection'/);
+  assert.match(firestoreRules, /request\.resource\.data\.inspected_by_server == false/);
+  assert.match(firestoreRules, /request\.resource\.data\.inspection_status == resource\.data\.inspection_status/);
+
+  // - Phone cannot write add_to_kiosk, add_to_kiosk_requested, or kiosk_addition_status on /deviceCommands/{uid}/commands/{cmdId}
+  assert.equal(
+    firestoreRules.includes("'add_to_kiosk_requested'"),
+    false,
+    'Phone affectedKeys allowlist must not include add_to_kiosk_requested'
+  );
+  assert.equal(
+    firestoreRules.includes("'kiosk_addition_status'"),
+    false,
+    'Phone affectedKeys allowlist must not include kiosk_addition_status'
+  );
+  assert.match(firestoreRules, /request\.resource\.data\.add_to_kiosk == resource\.data\.add_to_kiosk/);
+  assert.match(firestoreRules, /resource\.data\.cancelled != true/);
+});
