@@ -16,12 +16,15 @@ final class MaintenanceInput {
             field.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
             field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(128)});
         } else {
-            field.setKeyListener(DigitsKeyListener.getInstance("0123456789*#"));
+            DigitsKeyListener allowed = DigitsKeyListener.getInstance("0123456789*#");
+            field.setKeyListener(allowed);
             field.setRawInputType(InputType.TYPE_CLASS_PHONE);
-            field.setFilters(new InputFilter[]{new InputFilter.LengthFilter(6)});
+            // Remove unsupported pasted characters before applying the length limit.
+            field.setFilters(new InputFilter[]{allowed, new InputFilter.LengthFilter(6)});
         }
-        field.setTransformationMethod(PasswordTransformationMethod.getInstance());
         field.setSingleLine(true);
+        // setSingleLine replaces the transformation; apply masking last.
+        field.setTransformationMethod(PasswordTransformationMethod.getInstance());
         field.setTextDirection(android.view.View.TEXT_DIRECTION_LTR);
     }
 }
