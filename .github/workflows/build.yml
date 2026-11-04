@@ -54,6 +54,7 @@ jobs:
           gradle --no-daemon testDebugUnitTest
           gradle --no-daemon lintDebug
           gradle --no-daemon assembleDebug
+          gradle --no-daemon testReleaseUnitTest lintRelease assembleRelease
       - name: Print lint diagnostics on failure
         if: failure()
         run: cat app/build/intermediates/lint_intermediate_text_report/debug/lintReportDebug/lint-results-debug.txt || true
@@ -66,6 +67,31 @@ jobs:
           printf '%s\n' "$CERT_OUTPUT"
           ACTUAL=$(printf '%s\n' "$CERT_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
           test "$ACTUAL" = '9edb78f38add9eec104a510a5b7995effc1aa6b29c91081f6eb73144cb1aeed4'
+      - name: Verify manually installable APK and persistent signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          APKSIGNER="$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          CERT_OUTPUT=$("$APKSIGNER" verify --print-certs "$APK")
+          ACTUAL=$(printf '%s\n' "$CERT_OUTPUT" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
+          test "$ACTUAL" = '9edb78f38add9eec104a510a5b7995effc1aa6b29c91081f6eb73144cb1aeed4'
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump xmltree "$APK" AndroidManifest.xml > "$RUNNER_TEMP/release-manifest.txt"
+          python3 - "$RUNNER_TEMP/release-manifest.txt" <<'PY'
+          import re, sys
+          text = open(sys.argv[1]).read()
+          for flag in ('testOnly', 'debuggable'):
+              matches = re.findall(r'android:' + flag + r'\([^\n]*?=\(type 0x12\)(0x[0-9a-fA-F]+)', text)
+              if not matches or any(int(value, 16) != 0 for value in matches):
+                  raise SystemExit('Expected explicit false: ' + flag)
+          print('Verified testOnly=false and debuggable=false')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: injaz-mdm-manual-install
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
       - name: Remove temporary signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/injaz-mdm-release.p12"
