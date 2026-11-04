@@ -82,8 +82,8 @@ jobs:
           text = open(sys.argv[1]).read()
           for flag in ('testOnly', 'debuggable'):
               matches = re.findall(r'android:' + flag + r'\([^\n]*?=\(type 0x12\)(0x[0-9a-fA-F]+)', text)
-              if not matches or any(int(value, 16) != 0 for value in matches):
-                  raise SystemExit('Expected explicit false: ' + flag)
+              if (flag == 'testOnly' and not matches) or any(int(value, 16) != 0 for value in matches):
+                  raise SystemExit('Expected false (or default false for debuggable): ' + flag)
           print('Verified testOnly=false and debuggable=false')
           PY
       - uses: actions/upload-artifact@v4
