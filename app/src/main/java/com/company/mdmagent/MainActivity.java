@@ -27,6 +27,8 @@ public class MainActivity extends Activity {
     private static final int REQ_POST_NOTIFICATIONS = 2001;
 
     private TextView identity;
+    private TextView deviceHeading, deviceUid, diagnostics;
+    private Button register, copy;
     private TextView status;
     private Button sync;
     private Button resumeKiosk;
@@ -39,33 +41,25 @@ public class MainActivity extends Activity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         if (KioskController.enabled(this)) { KioskController.open(this); finish(); return; }
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(32, 64, 32, 32);
-        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(box);
-        setContentView(scroll);
-
-        TextView heading = new TextView(this);
-        heading.setText("إنجاز | تجربة إدارة الأجهزة");
-        heading.setTextSize(25);
-        box.addView(heading);
-
-        TextView description = new TextView(this);
-        description.setText(
-                "نسخة إدارة أجهزة الشركة (" + SyncEngine.AGENT_VERSION + "): منع مشاركة الإنترنت، والتحكم بتثبيت التطبيقات وإخفاء التطبيقات المحددة، وحماية شاشة الشركة. تبقى مكونات النظام الضرورية ومسؤولو الجهاز النشطون محميين. الإخفاء لا يحذف البيانات.\n\n"
-                + "البيانات المرسلة: نوع الجهاز، إصدار أندرويد، نسبة البطارية، حالة السياسات والقيود، وجرد التطبيقات. عند تفعيل الإدارة لسياسة تتبع الموقع، تجمع الخدمة الأمامية المعلنة إحداثيات موقع الجهاز لغايات العمل وساعات الدوام بإشعار مستمر؛ ولا تجمع جهات اتصال أو صورًا شخصية.\n"
-        );
-        box.addView(description);
-
-        identity = new TextView(this);
-        identity.setTextIsSelectable(true);
-        box.addView(identity);
-
-        Button register = new Button(this);
-        register.setText("تسجيل جهاز التجربة في Firebase");
-        box.addView(register);
+        DeviceScreen screen=new DeviceScreen(this);
+        screen.title("INJAZ.MDM",28,android.graphics.Color.WHITE).setTextDirection(View.TEXT_DIRECTION_LTR);
+        screen.title("إدارة الجهاز",21,android.graphics.Color.WHITE);
+        deviceHeading=screen.title(KioskController.deviceName(this),17,DeviceScreen.BLUE);
+        LinearLayout stateCard=screen.card("حالة الجهاز");
+        identity=screen.text("",15,android.graphics.Color.WHITE);stateCard.addView(identity);
+        Button details=screen.button("تفاصيل حالة الإدارة");stateCard.addView(details);
+        details.setOnClickListener(v->{
+            DevicePolicyManager dpm=(DevicePolicyManager)getSystemService(DEVICE_POLICY_SERVICE);
+            boolean owner=dpm!=null&&dpm.isDeviceOwnerApp(getPackageName());
+            new AlertDialog.Builder(this).setTitle("إدارة الجهاز").setMessage(owner
+                ? "إدارة جهاز الشركة مفعّلة. يستطيع النظام تطبيق سياسات الشركة على هذا الهاتف. للصيانة المؤقتة استخدم وضع الصيانة، ثم عُد لشاشة الشركة عند الانتهاء. هذا الخيار يعرض الحالة فقط ولا يلغي الإدارة أو يمسح البيانات."
+                : "إدارة جهاز الشركة غير مفعّلة. تواصل مع مسؤول النظام لإكمال إعداد الجهاز.").setPositiveButton("حسنًا",null).show();
+        });
+        LinearLayout infoCard=screen.card("معلومات الجهاز");
+        infoCard.addView(screen.text("معرّف الجهاز UID",14,DeviceScreen.BLUE));
+        deviceUid=screen.text("",15,android.graphics.Color.WHITE);deviceUid.setTextDirection(View.TEXT_DIRECTION_LTR);deviceUid.setTextIsSelectable(true);infoCard.addView(deviceUid);
+        infoCard.addView(screen.text("إصدار التطبيق: "+SyncEngine.AGENT_VERSION,14,android.graphics.Color.LTGRAY));
+        register=screen.button("تسجيل الجهاز");infoCard.addView(register);
         register.setOnClickListener(v -> {
             requestNotificationPermissionIfNeeded();
             if (FirebaseAuth.getInstance().getCurrentUser() != null) {
@@ -80,15 +74,14 @@ public class MainActivity extends Activity {
                     attachAndSync("register_new_anonymous");
                 } else {
                     Log.w(TAG, "ui_anonymous_auth_failed: " + String.valueOf(task.getException()));
-                    status.setText("فشل التسجيل. تأكد من تفعيل Anonymous Authentication والاتصال.\n"
-                            + String.valueOf(task.getException()));
+                    status.setText("تعذر تسجيل الجهاز. تحقق من الإنترنت أو تواصل مع مسؤول النظام.");
                 }
             });
         });
 
-        Button copy = new Button(this);
+        copy = screen.button("نسخ معرّف الجهاز");
         copy.setText("نسخ معرّف الجهاز UID");
-        box.addView(copy);
+        infoCard.addView(copy);
         copy.setOnClickListener(v -> {
             FirebaseUser currentUser = FirebaseAuth.getInstance().getCurrentUser();
             if (currentUser != null) {
@@ -100,19 +93,20 @@ public class MainActivity extends Activity {
             }
         });
 
-        sync = new Button(this);
+        LinearLayout actionCard=screen.card("المزامنة والتحقق");
+        sync = screen.button("مزامنة والتحقق الآن");
         sync.setText("مزامنة والتحقق الآن");
-        box.addView(sync);
+        actionCard.addView(sync);
         sync.setOnClickListener(v -> {
             Log.i(TAG, "ui_manual_sync_clicked");
             requestNotificationPermissionIfNeeded();
             SyncEngine.requestSync(getApplicationContext(), "ui_manual_button");
         });
 
-        resumeKiosk = new Button(this);
+        resumeKiosk = screen.button("إنهاء الصيانة والعودة لشاشة الشركة");
         resumeKiosk.setText("إنهاء الصيانة والعودة لشاشة الشركة");
         resumeKiosk.setVisibility(KioskController.inMaintenance(this)?View.VISIBLE:View.GONE);
-        box.addView(resumeKiosk);
+        screen.footer.addView(resumeKiosk);
         resumeKiosk.setOnClickListener(v -> {
             if(resumingKiosk)return;
             resumingKiosk=true;resumeKiosk.setEnabled(false);
@@ -130,38 +124,18 @@ public class MainActivity extends Activity {
             });
         });
 
-        Button deprovisionBtn = new Button(this);
-        deprovisionBtn.setText("حالة إدارة مسؤول الجهاز (Device Owner)");
-        box.addView(deprovisionBtn);
-        deprovisionBtn.setOnClickListener(v -> {
-            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
-            boolean isOwner = dpm != null && dpm.isDeviceOwnerApp(getPackageName());
-            new AlertDialog.Builder(this)
-                    .setTitle("إدارة مسؤول الجهاز (Device Owner)")
-                    .setMessage(isOwner
-                            ? "الجهاز مسجل كمسؤول جهاز معتمد (Device Owner).\n\n"
-                            + "تنبيه الأمان والامتثال:\n"
-                            + "وفق توثيق Android Enterprise الرسمي، لا يدعم النظام إنهاء إدارة الجهاز المدار بالكامل دون إعادة ضبط المصنع ومسح البيانات. لحماية بيانات وسجلات المبيعات من الفقدان، فإن استخدام دوال الاختبار التجريبية (clearDeviceOwnerApp) معطل في الإنتاج.\n\n"
-                            + "لإجراء تعديلات أو صيانة مؤقتة دون مسح البيانات، يُرجى استخدام «وضع الصيانة» المعتمد من شاشة الشركة، أو أرشفة الجهاز من لوحة الإدارة."
-                            : "الجهاز غير مسجل حالياً كمسؤول جهاز (Device Owner).")
-                    .setPositiveButton("حسناً", null)
-                    .show();
-        });
+        status=screen.text("",14,android.graphics.Color.WHITE);status.setTextIsSelectable(true);actionCard.addView(status);
+        LinearLayout more=screen.card("معلومات إضافية");
+        Button expand=screen.button("عرض الخصوصية والتشخيص");more.addView(expand);
+        LinearLayout extra=screen.column();extra.setVisibility(View.GONE);more.addView(extra);
+        extra.addView(screen.text("الخصوصية والبيانات",16,DeviceScreen.BLUE));
+        extra.addView(screen.text("يرسل التطبيق نوع الجهاز وإصدار أندرويد ونسبة البطارية وحالة سياسات الشركة وجرد التطبيقات. عند تفعيل سياسة تتبع الموقع، تُجمع إحداثيات الجهاز لغايات العمل وفق إعدادات الإدارة مع إشعار مستمر. لا يجمع التطبيق جهات الاتصال أو الصور الشخصية.",14,android.graphics.Color.WHITE));
+        extra.addView(screen.text("تبقى القيود المطبّقة سارية عند انقطاع الإنترنت. وصول تنبيه تحديث لا يعني اكتمال تطبيقه؛ راجع نتيجة المزامنة. قد يؤخر نظام الهاتف التحديثات بسبب إعدادات توفير الطاقة.",14,android.graphics.Color.LTGRAY));
+        diagnostics=screen.text("",13,android.graphics.Color.LTGRAY);diagnostics.setTextIsSelectable(true);extra.addView(diagnostics);
+        expand.setOnClickListener(v->{boolean show=extra.getVisibility()!=View.VISIBLE;extra.setVisibility(show?View.VISIBLE:View.GONE);expand.setText(show?"إخفاء التفاصيل":"عرض الخصوصية والتشخيص");});
+        screen.show();
+        updateIdentityView();
 
-        status = new TextView(this);
-        status.setTextIsSelectable(true);
-        box.addView(status);
-
-        TextView note = new TextView(this);
-        note.setText(
-                "\nطريقة المزامنة بالخلفية:\n"
-                + "• بعد تفعيل Device Owner وتسجيل الجهاز واعتماده في Firebase، يشغّل التطبيق خدمة أمامية («إدارة جهاز الشركة نشطة») للاستماع لتحديثات السياسة والتحقق منها من الخادم عبر SyncEngine.\n"
-                + "• تصل تنبيهات تحديث السياسة عبر FCM بعد تسجيل الجهاز ونشر وظائف الخادم؛ التنبيه ليس تأكيدًا للتطبيق.\n"
-                + "• يبقى WorkManager الدوري (كل 15 دقيقة أو أكثر بحسب النظام) مسارًا احتياطيًا، مع استعادة الخدمة بعد إعادة تشغيل الهاتف ضمن قيود أندرويد.\n"
-                + "• يظل استقبال التحديثات بالخلفية معتمدًا على توفر الإنترنت وسياسات نظام الهاتف لتوفير الطاقة، بينما تبقى القيود المطبقة سارية حتى دون إنترنت.\n"
-                + "• يستطيع المدير إنهاء الصيانة والعودة لشاشة الشركة من هذا التطبيق؛ الحظر ومنع المشاركة يبقيان حسب سياسة الإدارة."
-        );
-        box.addView(note);
     }
 
     @Override
@@ -232,12 +206,18 @@ public class MainActivity extends Activity {
     }
 
     private void updateIdentityView() {
+        if(identity==null)return;
         DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
         boolean isOwner = dpm != null && dpm.isDeviceOwnerApp(getPackageName());
         String ownerText = isOwner ? "مفعّل" : "غير مفعّل";
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
+        deviceHeading.setText(KioskController.deviceName(this));
+        register.setVisibility(user==null?View.VISIBLE:View.GONE);
+        copy.setEnabled(user!=null);
+        deviceUid.setText(user==null?"لم يُسجّل الجهاز بعد":user.getUid());
         if (user == null) {
-            identity.setText("Device Owner: " + ownerText + "\nلم يسجّل الجهاز بعد.");
+            identity.setText("إدارة الجهاز: " + ownerText + "\nالتسجيل: غير مسجّل");
+            diagnostics.setText("");
             return;
         }
         String uid = user.getUid();
@@ -253,13 +233,13 @@ public class MainActivity extends Activity {
         } else if (isOwner && approved) {
             serviceStatus = "جاهزة للتشغيل";
         } else {
-            serviceStatus = "بانتظار استيفاء الشروط (Device Owner + اعتماد الجهاز)";
+            serviceStatus = "بانتظار تفعيل الإدارة واعتماد الجهاز";
         }
-        identity.setText(
-                "Device Owner: " + ownerText
-                + "\nخدمة المزامنة بالخلفية: " + serviceStatus
-                + "\nاستقبال FCM: " + PushRegistration.status(this)
-                + "\nUID:\n" + uid + "\n"
-        );
+        String push=PushRegistration.status(this);
+        String pushSummary=push.startsWith("مسجّل")?"مسجّل لاستقبال التحديثات":push.startsWith("جارٍ")?"جارٍ التسجيل":push.startsWith("تعذر")?"تعذر التسجيل؛ راجع التفاصيل":"غير مسجّل";
+        identity.setText("إدارة الجهاز: "+ownerText+"\nاعتماد الجهاز: "+(approved?"معتمد":"بانتظار الاعتماد")
+                +"\nالمزامنة بالخلفية: "+serviceStatus+"\nتنبيهات التحديث: "+pushSummary);
+        diagnostics.setText("حالة استقبال التحديثات التفصيلية:\n"+push);
+
     }
 }

@@ -13,6 +13,7 @@ import java.util.*;
 public class KioskActivity extends Activity {
     private final BroadcastReceiver changed=new BroadcastReceiver(){public void onReceive(Context c,Intent i){render();}};
     private boolean registered;
+    private ScrollView appsScroll;
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
@@ -35,12 +36,13 @@ public class KioskActivity extends Activity {
         catch(RuntimeException ex){KioskController.lockFailed(this,ex);KioskController.queueStatus(this);showError("تعذر بدء قفل شاشة الشركة: "+ex.getMessage());return;}
         try { KioskController.confirmLocked(this); }
         catch(RuntimeException ex){KioskController.lockFailed(this,ex);KioskController.queueStatus(this);showError(KioskController.errorText(ex));return;}
-        ScrollView scroll=new ScrollView(this);scroll.setBackgroundColor(Color.rgb(10,24,44));
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setPadding(dp(20),dp(32),dp(20),dp(20));root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);scroll.addView(root);
-        TextView brand=new TextView(this);brand.setText("إنجاز");brand.setTextSize(38);brand.setTextColor(Color.WHITE);brand.setTypeface(null,Typeface.BOLD);root.addView(brand);
-        TextView hint=new TextView(this);hint.setText(KioskController.deviceName(this));hint.setTextColor(Color.rgb(150,190,210));hint.setTextSize(17);hint.setPadding(0,12,0,32);root.addView(hint);
+        int previousScroll=appsScroll==null?0:appsScroll.getScrollY();
+        DeviceScreen screen=new DeviceScreen(this);
+        appsScroll=screen.scroll;
+        screen.title("INJAZ.MDM",32,Color.WHITE).setTextDirection(View.TEXT_DIRECTION_LTR);
+        screen.title(KioskController.deviceName(this),18,DeviceScreen.BLUE);
         Set<String> apps=KioskController.prefs(this).getStringSet("apps",Collections.emptySet());
-        GridLayout grid=new GridLayout(this);grid.setColumnCount(4);root.addView(grid);
+        GridLayout grid=new GridLayout(this);grid.setColumnCount(4);screen.content.addView(grid);
         for(String pkg:new TreeSet<>(apps)){
             Button tile=new Button(this);String label=pkg;
             try {label=getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg,0)).toString();
@@ -59,15 +61,13 @@ public class KioskActivity extends Activity {
                 catch(RuntimeException ex){Toast.makeText(this,"تعذر فتح التطبيق: "+ex.getMessage(),Toast.LENGTH_LONG).show();}
             });grid.addView(tile);
         }
-        Button sync=new Button(this);sync.setText("تحديث تطبيقات العمل");sync.setOnClickListener(v->{SyncEngine.requestSync(this,"kiosk_refresh");Toast.makeText(this,"جارٍ التحقق من الإدارة",Toast.LENGTH_SHORT).show();});root.addView(sync);
-        Button admin=new Button(this);admin.setText("دخول المدير للصيانة");admin.setOnClickListener(v->maintenance());root.addView(admin);
-        TextView notice=new TextView(this);notice.setText("تثبيت التطبيقات متاح للإدارة فقط\nتظل إعدادات العمل محفوظة عند انقطاع الإنترنت");notice.setTextColor(Color.LTGRAY);notice.setPadding(0,24,0,8);root.addView(notice);
-        setContentView(scroll);
-        scroll.setOnApplyWindowInsetsListener((view,insets)->{
-            if(Build.VERSION.SDK_INT>=30){android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars());view.setPadding(bars.left,bars.top,bars.right,bars.bottom);}
-            return insets;
-        });
-        scroll.requestApplyInsets();
+        LinearLayout actions=new LinearLayout(this);actions.setOrientation(LinearLayout.HORIZONTAL);actions.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+        Button sync=screen.button("تحديث التطبيقات");sync.setOnClickListener(v->{SyncEngine.requestSync(this,"kiosk_refresh");Toast.makeText(this,"جارٍ التحقق من الإدارة",Toast.LENGTH_SHORT).show();});
+        Button admin=screen.button("دخول الإدارة");admin.setOnClickListener(v->maintenance());
+        LinearLayout.LayoutParams syncParams=new LinearLayout.LayoutParams(0,-2,1f);syncParams.setMarginEnd(dp(6));actions.addView(sync,syncParams);
+        LinearLayout.LayoutParams adminParams=new LinearLayout.LayoutParams(0,-2,1f);adminParams.setMarginStart(dp(6));actions.addView(admin,adminParams);
+        screen.footer.addView(actions);screen.show();
+        screen.scroll.post(()->screen.scroll.scrollTo(0,previousScroll));
         AgentApp.SYNC.execute(()->{try{String uid=SyncEngine.getCurrentAuthenticatedUid();if(uid!=null&&SyncEngine.isDeviceApproved(this,uid))KioskController.publishStatus(this,com.google.firebase.firestore.FirebaseFirestore.getInstance(),uid,KioskController.prefs(this).getString("last_error",""));}catch(Exception ex){android.util.Log.w(SyncEngine.TAG,"kiosk_ui_status_failed",ex);}});
     }
     private void showError(String message){LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);TextView t=new TextView(this);t.setText(message);root.addView(t);Button b=new Button(this);b.setText("صيانة المدير");b.setOnClickListener(v->maintenance());root.addView(b);
