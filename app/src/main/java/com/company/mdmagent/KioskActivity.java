@@ -40,13 +40,14 @@ public class KioskActivity extends Activity {
         TextView brand=new TextView(this);brand.setText("إنجاز");brand.setTextSize(38);brand.setTextColor(Color.WHITE);brand.setTypeface(null,Typeface.BOLD);root.addView(brand);
         TextView hint=new TextView(this);hint.setText(KioskController.deviceName(this));hint.setTextColor(Color.rgb(150,190,210));hint.setTextSize(17);hint.setPadding(0,12,0,32);root.addView(hint);
         Set<String> apps=KioskController.prefs(this).getStringSet("apps",Collections.emptySet());
-        GridLayout grid=new GridLayout(this);grid.setColumnCount(getResources().getConfiguration().screenWidthDp>=600?4:3);root.addView(grid);
+        GridLayout grid=new GridLayout(this);grid.setColumnCount(4);root.addView(grid);
         for(String pkg:new TreeSet<>(apps)){
             Button tile=new Button(this);String label=pkg;
             try {label=getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg,0)).toString();
                 android.graphics.drawable.Drawable icon=getPackageManager().getApplicationIcon(pkg);icon.setBounds(0,0,dp(48),dp(48));tile.setCompoundDrawables(null,icon,null,null);tile.setCompoundDrawablePadding(dp(12));
             }catch(Exception ignored){ /* Retain package label so a missing app remains explainable. */ }
-            tile.setText(label);tile.setTextSize(15);tile.setAllCaps(false);tile.setTextColor(Color.WHITE);
+            tile.setMinWidth(0);tile.setMinimumWidth(0);tile.setMaxLines(2);tile.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            tile.setText(label);tile.setTextSize(13);tile.setAllCaps(false);tile.setTextColor(Color.WHITE);
             tile.setBackgroundColor(Color.TRANSPARENT);tile.setElevation(0);tile.setPadding(dp(4),dp(12),dp(4),dp(12));
             GridLayout.LayoutParams lp=new GridLayout.LayoutParams();lp.width=0;lp.height=dp(124);lp.columnSpec=GridLayout.spec(GridLayout.UNDEFINED,1f);lp.setMargins(dp(5),dp(5),dp(5),dp(5));tile.setLayoutParams(lp);
             tile.setOnClickListener(v->{
