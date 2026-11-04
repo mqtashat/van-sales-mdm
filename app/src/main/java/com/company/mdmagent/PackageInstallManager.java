@@ -331,11 +331,21 @@ public final class PackageInstallManager {
         }
     }
 
+    interface ServerCommandVerifier {
+        void verify(Context context, String uid, String cmdId, long expiresAtMs) throws Exception;
+    }
+
+    static ServerCommandVerifier serverVerifierForTest = null;
+
     /**
      * Verifies against Firestore (Source.SERVER) that the device enrollment is still approved
      * and the install command has not been cancelled or expired.
      */
     static void verifyCommandStillActiveOnServer(Context context, String uid, String cmdId, long expiresAtMs) throws Exception {
+        if (serverVerifierForTest != null) {
+            serverVerifierForTest.verify(context, uid, cmdId, expiresAtMs);
+            return;
+        }
         if (uid == null || uid.isEmpty() || !SyncEngine.isDeviceApproved(context, uid)) {
             throw new SecurityException("الجهاز غير معتمد أو تم سحب اعتماده؛ تم رفض متابعة التثبيت.");
         }
@@ -668,71 +678,23 @@ public final class PackageInstallManager {
                             + ") لا تطابق بصمة الشهادة المعتمدة (" + expectedCertSha256 + ")");
                 }
 
-                // 7. Open PackageInstaller Session and stream verified APK
-                if (callback != null) callback.onProgress("جارٍ بث الحزمة عبر جلسة PackageInstaller الإدارية...");
-                installer = pm.getPackageInstaller();
-                PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
-                        PackageInstaller.SessionParams.MODE_FULL_INSTALL
+                // 7-9. Execute verified session creation, restore restriction before network check, re-suspend for commit
+                executeVerifiedSessionInstall(
+                        context,
+                        tempApk,
+                        expectedPackageName,
+                        expectedVersionCode,
+                        expectedCertSha256,
+                        preInstallVersion,
+                        preInstallUpdateTime,
+                        cmdId,
+                        null,
+                        uid,
+                        expiresAtMs,
+                        addToKiosk,
+                        callback
                 );
-                params.setAppPackageName(expectedPackageName);
-
-                sessionId = installer.createSession(params);
-                session = installer.openSession(sessionId);
-
-                try (InputStream in = new FileInputStream(tempApk);
-                     OutputStream out = session.openWrite("package_session", 0, tempApk.length())) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) > 0) {
-                        out.write(buf, 0, n);
-                    }
-                    session.fsync(out);
-                }
-
-                // Delete temporary APK immediately after streaming into session
-                if (tempApk.exists()) {
-                    tempApk.delete();
-                    tempApk = null;
-                }
-
-                // 8. Re-verify command expiration, cancellation status, and device approval RIGHT BEFORE session.commit()
-                if (callback != null) callback.onProgress("جارٍ إعادة التحقق من حالة الأمر واعتماد الجهاز قبل الاعتماد النهائي...");
-                verifyCommandStillActiveOnServer(context, uid, cmdId, expiresAtMs);
-
-                // 9. Synchronously persist session task state BEFORE session.commit() and verify commit() succeeds
-                SharedPreferences taskPrefs = context.getSharedPreferences(PREFS_TASKS, Context.MODE_PRIVATE);
-                String taskKey = "session_" + sessionId;
-                boolean stateSaved = taskPrefs.edit()
-                        .putInt(taskKey + "_session_id", sessionId)
-                        .putString(taskKey + "_cmd_id", cmdId != null ? cmdId : "")
-                        .putString(taskKey + "_uid", uid != null ? uid : "")
-                        .putString(taskKey + "_pkg", expectedPackageName)
-                        .putLong(taskKey + "_version_code", expectedVersionCode)
-                        .putLong(taskKey + "_pre_install_version", preInstallVersion)
-                        .putLong(taskKey + "_pre_install_update_time", preInstallUpdateTime)
-                        .putLong(taskKey + "_expires_at_ms", expiresAtMs)
-                        .putString(taskKey + "_cert_sha256", expectedCertSha256)
-                        .putBoolean(taskKey + "_add_to_kiosk", addToKiosk)
-                        .putLong(taskKey + "_created_at", System.currentTimeMillis())
-                        .putString(taskKey + "_state", "COMMITTED")
-                        .commit();
-
-                if (!stateSaved) {
-                    throw new IllegalStateException("تعذر حفظ حالة مهمة التثبيت بشكل متزامن قبل commit؛ تم إلغاء الجلسة.");
-                }
-
-                // 10. Commit session with explicit IntentSender delivered to InstallStatusReceiver
-                Intent intent = new Intent(context, InstallStatusReceiver.class);
-                intent.setAction(InstallStatusReceiver.ACTION_INSTALL_COMMIT_RESULT);
-                PendingIntent pendingIntent = PendingIntent.getBroadcast(
-                        context, sessionId, intent,
-                        PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_MUTABLE : 0)
-                );
-
-                if (callback != null) callback.onProgress("تم إرسال الحزمة للنظام وبانتظار تأكيد النتيجة...");
-                session.commit(pendingIntent.getIntentSender());
-                session.close();
-                session = null;
+                tempApk = null;
 
             } catch (Exception ex) {
                 Log.e(TAG, "downloadAndInstall error: " + ex.getMessage(), ex);
@@ -755,6 +717,144 @@ public final class PackageInstallManager {
                 }
             }
         });
+    }
+
+    /**
+     * Executes the PackageInstaller session creation, streaming, server re-verification outside
+     * the suspension window, and session commit with strict attemptId ownership and live-attempt tracking.
+     */
+    static void executeVerifiedSessionInstall(Context context,
+                                              File tempApk,
+                                              String expectedPackageName,
+                                              int expectedVersionCode,
+                                              String expectedCertSha256,
+                                              long preInstallVersion,
+                                              long preInstallUpdateTime,
+                                              String cmdId,
+                                              String attemptIdOverride,
+                                              String uid,
+                                              long expiresAtMs,
+                                              boolean addToKiosk,
+                                              InstallCallback callback) throws Exception {
+        // 7. Re-verify command expiration, cancellation status, and device approval before session creation
+        if (callback != null) callback.onProgress("جارٍ إعادة التحقق من حالة الأمر واعتماد الجهاز قبل فتح جلسة التثبيت...");
+        verifyCommandStillActiveOnServer(context, uid, cmdId, expiresAtMs);
+
+        // 8. Suspend DISALLOW_INSTALL_APPS before createSession
+        String attemptId = (attemptIdOverride != null && !attemptIdOverride.trim().isEmpty())
+                ? attemptIdOverride.trim()
+                : java.util.UUID.randomUUID().toString();
+        PackageManager pm = context.getPackageManager();
+        PackageInstaller installer = null;
+        PackageInstaller.Session session = null;
+        int sessionId = -1;
+        Exception primaryEx = null;
+
+        RestrictionManager.registerLiveAttempt(attemptId);
+        try {
+            RestrictionManager.suspendInstallRestrictionForApprovedTask(context, cmdId, attemptId, expectedPackageName);
+
+            if (callback != null) callback.onProgress("جارٍ إنشاء وبث جلسة PackageInstaller الإدارية...");
+            installer = pm.getPackageInstaller();
+            PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
+                    PackageInstaller.SessionParams.MODE_FULL_INSTALL
+            );
+            params.setAppPackageName(expectedPackageName);
+
+            sessionId = installer.createSession(params);
+            RestrictionManager.bindSessionToAttempt(context, attemptId, sessionId);
+            session = installer.openSession(sessionId);
+
+            try (InputStream in = new FileInputStream(tempApk);
+                 OutputStream out = session.openWrite("package_session", 0, tempApk.length())) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+                session.fsync(out);
+            }
+
+            // Delete temporary APK immediately after streaming into session
+            if (tempApk != null && tempApk.exists()) {
+                tempApk.delete();
+            }
+
+            // 9. Restore restriction BEFORE network read/wait, verify server command, then re-suspend for commit
+            if (callback != null) callback.onProgress("جارٍ استعادة القيد مؤقتًا للتحقق الخادمي من الأمر...");
+            RestrictionManager.restoreInstallRestrictionIfNeeded(context, attemptId);
+
+            if (callback != null) callback.onProgress("جارٍ إعادة التحقق من حالة الأمر واعتماد الجهاز قبل الاعتماد النهائي...");
+            verifyCommandStillActiveOnServer(context, uid, cmdId, expiresAtMs);
+
+            if (callback != null) callback.onProgress("إعادة تعليق قيد التثبيت قبل اعتماد جلسة PackageInstaller...");
+            RestrictionManager.suspendInstallRestrictionForApprovedTask(context, cmdId, attemptId, expectedPackageName, sessionId);
+
+            // Synchronously persist session task state BEFORE session.commit() and verify commit() succeeds
+            SharedPreferences taskPrefs = context.getSharedPreferences(PREFS_TASKS, Context.MODE_PRIVATE);
+            String taskKey = "session_" + sessionId;
+            boolean stateSaved = taskPrefs.edit()
+                        .putInt(taskKey + "_session_id", sessionId)
+                        .putString(taskKey + "_cmd_id", cmdId != null ? cmdId : "")
+                        .putString(taskKey + "_attempt_id", attemptId)
+                        .putString(taskKey + "_uid", uid != null ? uid : "")
+                        .putString(taskKey + "_pkg", expectedPackageName)
+                        .putLong(taskKey + "_version_code", expectedVersionCode)
+                        .putLong(taskKey + "_pre_install_version", preInstallVersion)
+                        .putLong(taskKey + "_pre_install_update_time", preInstallUpdateTime)
+                        .putLong(taskKey + "_expires_at_ms", expiresAtMs)
+                        .putString(taskKey + "_cert_sha256", expectedCertSha256)
+                        .putBoolean(taskKey + "_add_to_kiosk", addToKiosk)
+                        .putLong(taskKey + "_created_at", System.currentTimeMillis())
+                        .putString(taskKey + "_state", "COMMITTED")
+                        .commit();
+
+            if (!stateSaved) {
+                throw new IllegalStateException("تعذر حفظ حالة مهمة التثبيت بشكل متزامن قبل commit؛ تم إلغاء الجلسة.");
+            }
+
+            // Commit session with explicit IntentSender
+            Intent intent = new Intent(context, InstallStatusReceiver.class);
+            intent.setAction(InstallStatusReceiver.ACTION_INSTALL_COMMIT_RESULT);
+            PendingIntent pendingIntent = PendingIntent.getBroadcast(
+                    context, sessionId, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_MUTABLE : 0)
+            );
+
+            if (callback != null) callback.onProgress("تم إرسال الحزمة للنظام وبانتظار تأكيد النتيجة...");
+            session.commit(pendingIntent.getIntentSender());
+            session.close();
+            session = null;
+
+        } catch (Exception ex) {
+            primaryEx = ex;
+            if (session != null) {
+                try {
+                    session.abandon();
+                } catch (Exception ignored) {}
+                try {
+                    session.close();
+                } catch (Exception ignored) {}
+            } else if (installer != null && sessionId >= 0) {
+                try {
+                    installer.abandonSession(sessionId);
+                } catch (Exception ignored) {}
+            }
+            throw ex;
+        } finally {
+            RestrictionManager.unregisterLiveAttempt(attemptId);
+            try {
+                RestrictionManager.restoreInstallRestrictionIfNeeded(context, attemptId);
+            } catch (Exception restoreEx) {
+                String restoreError = "فشلت استعادة قيد التثبيت بعد الجلسة: " + restoreEx.getMessage();
+                Log.e(TAG, restoreError, restoreEx);
+                if (primaryEx != null) {
+                    primaryEx.addSuppressed(restoreEx);
+                } else {
+                    throw restoreEx;
+                }
+            }
+        }
     }
 
     /**
@@ -831,24 +931,28 @@ public final class PackageInstallManager {
             updates.put("error_code", errorCode);
         }
 
-        FirebaseFirestore.getInstance()
-                .collection("deviceCommands")
-                .document(uid)
-                .collection("commands")
-                .document(cmdId)
-                .update(updates)
-                .addOnSuccessListener(unused -> {
-                    Log.i(TAG, "Server acknowledged install result for cmd=" + cmdId + " (" + resultStatus + "); clearing local task " + prefix);
-                    clearTask(p, prefix);
-                })
-                .addOnFailureListener(ex -> {
-                    Log.w(TAG, "Failed to acknowledge install result for cmd=" + cmdId + "; retaining in local retry queue: " + ex.getMessage());
-                });
+        try {
+            FirebaseFirestore.getInstance()
+                    .collection("deviceCommands")
+                    .document(uid)
+                    .collection("commands")
+                    .document(cmdId)
+                    .update(updates)
+                    .addOnSuccessListener(unused -> {
+                        Log.i(TAG, "Server acknowledged install result for cmd=" + cmdId + " (" + resultStatus + "); clearing local task " + prefix);
+                        clearTask(p, prefix);
+                    })
+                    .addOnFailureListener(ex -> {
+                        Log.w(TAG, "Failed to acknowledge install result for cmd=" + cmdId + "; retaining in local retry queue: " + ex.getMessage());
+                    });
+        } catch (Exception ex) {
+            Log.w(TAG, "Firestore not ready while flushing install result for cmd=" + cmdId + "; retaining in local retry queue: " + ex.getMessage());
+        }
     }
 
     /**
-     * Recovers pending install results and inspects active/failed PackageInstaller sessions
-     * after process restart or device reboot.
+     * Recovers pending install results, inspects active/failed PackageInstaller sessions,
+     * and recovers orphaned install restriction suspensions after process restart or device reboot.
      */
     public static void recoverPendingInstallTasks(Context context) {
         SharedPreferences p = context.getSharedPreferences(PREFS_TASKS, Context.MODE_PRIVATE);
@@ -884,6 +988,12 @@ public final class PackageInstallManager {
             }
 
             if (!"COMMITTED".equals(state)) {
+                continue;
+            }
+
+            String attemptId = p.getString(prefix + "_attempt_id", "");
+            if (attemptId != null && !attemptId.trim().isEmpty()
+                    && RestrictionManager.isAttemptLiveInProcess(attemptId)) {
                 continue;
             }
 
@@ -1015,6 +1125,9 @@ public final class PackageInstallManager {
                 );
             }
         }
+
+        // 4. Recover any orphaned or legacy install restriction suspension records
+        RestrictionManager.recoverOrphanedSuspensionsIfNeeded(context);
     }
 
     static boolean clearTask(SharedPreferences p, String prefix) {
@@ -1022,6 +1135,7 @@ public final class PackageInstallManager {
         return p.edit()
                 .remove(prefix + "_session_id")
                 .remove(prefix + "_cmd_id")
+                .remove(prefix + "_attempt_id")
                 .remove(prefix + "_uid")
                 .remove(prefix + "_cert_sha256")
                 .remove(prefix + "_version_code")
