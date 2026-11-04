@@ -91,6 +91,8 @@ public class RestrictionManagerTest {
 
         // Apply default AppInstallPolicy (blockAppInstalls = true) so DISALLOW_INSTALL_APPS is owned and active
         AppInstallPolicy.saveLocal(c, new AppInstallPolicy(1L, true));
+        RestrictionManager.reconcile(c,
+                RestrictionManager.computeRequiredRestrictions(c, false, true, false, false));
         assertTrue(dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_INSTALL_APPS, false));
     }
 

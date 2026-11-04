@@ -95,6 +95,8 @@ public class PackageInstallManagerTest {
         }
 
         AppInstallPolicy.saveLocal(c, new AppInstallPolicy(1L, true));
+        RestrictionManager.reconcile(c,
+                RestrictionManager.computeRequiredRestrictions(c, false, true, false, false));
         assertTrue(dpm.getUserRestrictions(admin).getBoolean(UserManager.DISALLOW_INSTALL_APPS, false));
     }
 
