@@ -514,7 +514,7 @@ public final class RestrictionManager {
                     applyErrors.add("applyFailed:" + req);
                 }
             } catch (Exception ex) {
-                applyErrors.add(req + ": " + ex.getMessage());
+                applyErrors.add(req + ": " + ex.toString());
             }
         }
         if (!applyErrors.isEmpty()) {
@@ -540,7 +540,7 @@ public final class RestrictionManager {
                     remainingOwned.remove(rem);
                 }
             } catch (Exception ex) {
-                clearErrors.add(rem + ": " + ex.getMessage());
+                clearErrors.add(rem + ": " + ex.toString());
             }
         }
         requireSave(commitEditor(p.edit().putStringSet(KEY_OWNED_RESTRICTIONS, remainingOwned), "save_remaining_owned_restrictions"));
@@ -575,7 +575,7 @@ public final class RestrictionManager {
                     remaining.remove(r);
                 }
             } catch (Exception ex) {
-                errors.add(r + ": " + ex.getMessage());
+                errors.add(r + ": " + ex.toString());
             }
         }
         requireSave(commitEditor(p.edit().putStringSet(KEY_OWNED_RESTRICTIONS, remaining), "clear_all_owned"));
