@@ -36,8 +36,8 @@ import {
 } from '../utils/validation.ts';
 import { lookupAppInfo } from '../utils/appCatalog.ts';
 
-export const MIN_MAINTENANCE_PASSWORD_LENGTH = 12;
-export const MAX_MAINTENANCE_PASSWORD_LENGTH = 128;
+export const MIN_MAINTENANCE_PASSWORD_LENGTH = 4;
+export const MAX_MAINTENANCE_PASSWORD_LENGTH = 6;
 export const PBKDF2_ITERATIONS = 120000;
 
 function extractTimestampMs(val: unknown): number | null {
@@ -90,7 +90,7 @@ function bytesToHex(bytes: Uint8Array): string {
 
 /**
  * Generates PBKDF2-HMAC-SHA256 verifier (120,000 iterations, 16-byte random salt).
- * Strictly enforces a minimum maintenance password length of 12 characters.
+ * Strictly enforces a maintenance code of 4–6 digits, * or #.
  */
 export async function passwordVerifier(
   password: string,
@@ -99,10 +99,11 @@ export async function passwordVerifier(
   if (
     typeof password !== 'string' ||
     password.length < MIN_MAINTENANCE_PASSWORD_LENGTH ||
-    password.length > MAX_MAINTENANCE_PASSWORD_LENGTH
+    password.length > MAX_MAINTENANCE_PASSWORD_LENGTH ||
+    !/^[0-9*#]{4,6}$/.test(password)
   ) {
     throw new Error(
-      `يجب أن تتكون كلمة مرور الصيانة من ${MIN_MAINTENANCE_PASSWORD_LENGTH} إلى ${MAX_MAINTENANCE_PASSWORD_LENGTH} حرفًا.`
+      'رمز الصيانة يجب أن يكون من 4 إلى 6 خانات: الأرقام 0–9 والرمزان * و# فقط.'
     );
   }
 
@@ -674,7 +675,7 @@ export interface ExecuteKioskSaveParams {
 /**
  * Actual Kiosk save execution path used by KioskPanel.handleSave:
  * 1. Verifies server-authoritative admin document (admins/{actor.uid}) when needed
- * 2. Derives or reuses PBKDF2-HMAC-SHA256 (120,000 iterations) 12+ char maintenance verifier
+ * 2. Derives or reuses PBKDF2-HMAC-SHA256 (120,000 iterations) 4–6 character maintenance verifier
  * 3. Runs a single atomic Firestore transaction that reads kioskPolicies/{uid}, enrollments/{uid},
  *    deviceStatus/{uid}, policies/{uid}, and deviceAppInventory/{uid}, validates all preconditions via
  *    validateAndBuildKioskTransaction, and writes BOTH kioskPolicies/{uid} and auditLogs/{autoId}
@@ -710,15 +711,11 @@ export async function executeKioskSave(
 
   const needsNewPassword = !remote || password.length > 0 || confirmPassword.length > 0;
   if (needsNewPassword) {
-    if (password.length < MIN_MAINTENANCE_PASSWORD_LENGTH) {
-      throw new Error(
-        remote
-          ? `أدخل كلمة مرور صيانة جديدة من ${MIN_MAINTENANCE_PASSWORD_LENGTH} حرفًا على الأقل أو اترك الحقلين فارغين للإبقاء على كلمة المرور الحالية.`
-          : `يجب تعيين كلمة مرور صيانة المدير (${MIN_MAINTENANCE_PASSWORD_LENGTH} حرفًا على الأقل) عند إعداد شاشة الشركة لأول مرة.`
-      );
+    if (!/^[0-9*#]{4,6}$/.test(password)) {
+      throw new Error('أدخل رمز صيانة من 4 إلى 6 خانات: الأرقام 0–9 والرمزان * و# فقط، أو اترك الحقلين فارغين للإبقاء على الرمز الحالي.');
     }
     if (password !== confirmPassword) {
-      throw new Error('استخدم كلمة مرور من 12 حرفًا على الأقل، وأكدها بنفس القيمة.');
+      throw new Error('رمز الصيانة وتأكيده غير متطابقين.');
     }
   }
 
@@ -1611,7 +1608,7 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
           </div>
         </div>
 
-        {/* Left Column: Selected Apps Summary + Maintenance Password (12+ chars) + Save */}
+        {/* Left Column: Selected Apps Summary + Maintenance Password (4–6 characters) + Save */}
         <div className="lg:col-span-5 space-y-5">
           {/* Selected Apps Summary Card */}
           <div className="bg-white rounded-2xl border border-slate-200/90 p-5 shadow-xs space-y-4">
@@ -1681,7 +1678,7 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
               </div>
               <div>
                 <h4 className="text-sm font-bold text-slate-900">
-                  كلمة مرور صيانة المدير (12 حرفًا على الأقل)
+                  كلمة مرور صيانة المدير (4 إلى 6 خانات: 0–9 و* و#)
                 </h4>
                 <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
                   تُستخدم على الهاتف للدخول إلى وضع الصيانة محليًا دون إنترنت. تُشتق عبر
@@ -1695,7 +1692,7 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                 <span>
                   توجد كلمة مرور صيانة محفوظة حاليًا. اترك الحقلين فارغين للإبقاء عليها، أو أدخل
-                  كلمة جديدة (12 حرفًا على الأقل) لتغييرها.
+                  كلمة جديدة (4 إلى 6 خانات: 0–9 و* و#) لتغييرها.
                 </span>
               </div>
             )}
@@ -1707,6 +1704,11 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
                 </label>
                 <input
                   type="password"
+                  inputMode="tel"
+                  dir="ltr"
+                  minLength={4}
+                  maxLength={6}
+                  pattern="[0-9*#]{4,6}"
                   autoComplete="new-password"
                   value={password}
                   disabled={!approved}
@@ -1714,7 +1716,7 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
                     beginEdit();
                     setPassword(e.target.value);
                   }}
-                  placeholder="12 حرفًا على الأقل"
+                  placeholder="4 إلى 6 خانات: 0–9 و* و#"
                   className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:bg-white focus:border-blue-600 focus:outline-none disabled:opacity-50"
                 />
               </div>
@@ -1724,6 +1726,11 @@ export const KioskPanel: React.FC<KioskPanelProps> = ({
                 </label>
                 <input
                   type="password"
+                  inputMode="tel"
+                  dir="ltr"
+                  minLength={4}
+                  maxLength={6}
+                  pattern="[0-9*#]{4,6}"
                   autoComplete="new-password"
                   value={confirmPassword}
                   disabled={!approved}
