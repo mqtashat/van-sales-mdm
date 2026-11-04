@@ -509,7 +509,7 @@ test('14. formatLastSeenAr produces honest relative text and acknowledges FCM ba
   assert.ok(oldSeen.explanation.includes('لا يُعد قدم التاريخ دليلاً قاطعاً'));
 });
 
-test('15. kiosk requires explicit valid fields and 12+ char maintenance verifier with PBKDF2-HMAC-SHA256 (120000 iterations)', async () => {
+test('15. kiosk requires explicit valid fields and 4–6 keypad character maintenance verifier with PBKDF2-HMAC-SHA256 (120000 iterations)', async () => {
   const {
     validateKiosk,
     passwordVerifier,
@@ -518,21 +518,27 @@ test('15. kiosk requires explicit valid fields and 12+ char maintenance verifier
     PBKDF2_ITERATIONS,
   } = await import('../admin-web/src/components/KioskPanel.tsx');
 
-  assert.equal(MIN_MAINTENANCE_PASSWORD_LENGTH, 12);
+  assert.equal(MIN_MAINTENANCE_PASSWORD_LENGTH, 4);
   assert.equal(PBKDF2_ITERATIONS, 120000);
+  for (const invalid of ['', '123', '1234567', '12a4', '12+4', '12 4', '١٢٣٤']) {
+    await assert.rejects(() => passwordVerifier(invalid), /4 إلى 6/);
+  }
+  for (const valid of ['1234', '12*#5', '123456']) {
+    assert.match((await passwordVerifier(valid)).exit_hash, /^[a-f0-9]{64}$/);
+  }
 
-  // Rejects passwords shorter than 12 characters
+  // Rejects letters and long passwords
   await assert.rejects(
     async () => passwordVerifier('short8ch'),
-    /12 إلى 128 حرفًا/
+    /4 إلى 6/
   );
   await assert.rejects(
     async () => passwordVerifier('11charslong'),
-    /12 إلى 128 حرفًا/
+    /4 إلى 6/
   );
 
-  // Accepts 12+ character password and derives PBKDF2-HMAC-SHA256 with 120000 iterations
-  const credential = await passwordVerifier('A-long-test-password!');
+  // Accepts a 4–6 character keypad code and derives PBKDF2-HMAC-SHA256 with 120000 iterations
+  const credential = await passwordVerifier('12*#56');
   const p = {
     schema_version: 1,
     revision: 1,
@@ -549,7 +555,7 @@ test('15. kiosk requires explicit valid fields and 12+ char maintenance verifier
   const { pbkdf2Sync } = await import('node:crypto');
   assert.equal(
     pbkdf2Sync(
-      'A-long-test-password!',
+      '12*#56',
       Buffer.from(credential.exit_salt, 'hex'),
       120000,
       32,
@@ -631,7 +637,7 @@ test('17. validateAndBuildKioskTransaction strictly requires device_owner === tr
     '../admin-web/src/components/KioskPanel.tsx'
   );
 
-  const secretPassword = 'AdminSecretPassword#2026';
+  const secretPassword = '53*#61';
   const credential = await passwordVerifier(secretPassword);
 
   const validBaseInput = {
@@ -898,7 +904,7 @@ test('18. applyKioskSnapshotToDraftState preserves admin draft and pinned expect
   const { applyKioskSnapshotToDraftState, passwordVerifier } = await import(
     '../admin-web/src/components/KioskPanel.tsx'
   );
-  const cred = await passwordVerifier('ValidMaintenancePass123!');
+  const cred = await passwordVerifier('13#579');
 
   const policyV1 = {
     schema_version: 1,
@@ -939,8 +945,8 @@ test('18. applyKioskSnapshotToDraftState preserves admin draft and pinned expect
     isDirty: true,
     enabled: true,
     allowedApps: ['com.whatsapp', 'com.admin.draftapp'],
-    password: 'NewAdminPassword12345',
-    confirmPassword: 'NewAdminPassword12345',
+    password: '98*765',
+    confirmPassword: '98*765',
   };
 
   // New snapshot v2 arrives while admin has an active dirty draft
@@ -949,7 +955,7 @@ test('18. applyKioskSnapshotToDraftState preserves admin draft and pinned expect
   // Draft values and expectedRevision MUST remain preserved, and revisionConflict MUST be set
   assert.equal(afterSnapshotV2.enabled, true);
   assert.deepEqual(afterSnapshotV2.allowedApps, ['com.whatsapp', 'com.admin.draftapp']);
-  assert.equal(afterSnapshotV2.password, 'NewAdminPassword12345');
+  assert.equal(afterSnapshotV2.password, '98*765');
   assert.equal(afterSnapshotV2.expectedRevision, 1);
   assert.notEqual(afterSnapshotV2.revisionConflict, null);
   assert.equal(afterSnapshotV2.revisionConflict?.pinnedRevision, 1);
@@ -1201,7 +1207,7 @@ test('20. evaluateKioskEnforcementState only reports applied when configured_rev
   const { evaluateKioskEnforcementState, passwordVerifier } = await import(
     '../admin-web/src/components/KioskPanel.tsx'
   );
-  const cred = await passwordVerifier('ValidMaintenancePass123!');
+  const cred = await passwordVerifier('13#579');
 
   const enabledPolicy = {
     schema_version: 1,
@@ -1451,8 +1457,8 @@ test('22. executeKioskSave writes kioskPolicies and auditLogs atomically inside 
     expectedRevision: null,
     enabled: true,
     allowedApps: ['com.whatsapp'],
-    password: 'StrongMaintenancePass#12',
-    confirmPassword: 'StrongMaintenancePass#12',
+    password: '56#789',
+    confirmPassword: '56#789',
     remote: null,
     deps: env1.deps,
   });
@@ -1470,7 +1476,7 @@ test('22. executeKioskSave writes kioskPolicies and auditLogs atomically inside 
   assert.equal(writtenAudit1.action, 'update_policy');
   assert.equal(writtenAudit1.created_at, 'SERVER_TIMESTAMP_SENTINEL');
   const auditJson = JSON.stringify(writtenAudit1);
-  assert.equal(auditJson.includes('StrongMaintenancePass#12'), false);
+  assert.equal(auditJson.includes('56#789'), false);
   assert.equal(auditJson.includes(savedPolicy1.exit_salt), false);
   assert.equal(auditJson.includes(savedPolicy1.exit_hash), false);
 
@@ -1493,8 +1499,8 @@ test('22. executeKioskSave writes kioskPolicies and auditLogs atomically inside 
         expectedRevision: null,
         enabled: true,
         allowedApps: ['com.whatsapp'],
-        password: 'StrongMaintenancePass#12',
-        confirmPassword: 'StrongMaintenancePass#12',
+        password: '56#789',
+        confirmPassword: '56#789',
         remote: null,
         deps: envMissingDeviceOwner.deps,
       }),
@@ -1525,8 +1531,8 @@ test('22. executeKioskSave writes kioskPolicies and auditLogs atomically inside 
         expectedRevision: null,
         enabled: true,
         allowedApps: ['com.whatsapp'],
-        password: 'StrongMaintenancePass#12',
-        confirmPassword: 'StrongMaintenancePass#12',
+        password: '56#789',
+        confirmPassword: '56#789',
         remote: null,
         deps: envBlockedConflict.deps,
       }),
