@@ -43,7 +43,7 @@ public class KioskActivity extends Activity {
         screen.title(KioskController.deviceName(this),18,DeviceScreen.BLUE);
         Set<String> apps=KioskController.prefs(this).getStringSet("apps",Collections.emptySet());
         GridLayout grid=new GridLayout(this);grid.setColumnCount(4);screen.content.addView(grid);
-        for(String pkg:new TreeSet<>(apps)){
+        for(String pkg:KioskController.orderedApps(this)){
             Button tile=new Button(this);String label=pkg;
             try {label=getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg,0)).toString();
                 android.graphics.drawable.Drawable icon=getPackageManager().getApplicationIcon(pkg);icon.setBounds(0,0,dp(48),dp(48));tile.setCompoundDrawables(null,icon,null,null);tile.setCompoundDrawablePadding(dp(12));
@@ -82,17 +82,15 @@ public class KioskActivity extends Activity {
         }
         setContentView(root);}
     private void maintenance(){
-        EditText password=new EditText(this);MaintenanceInput.configure(password, false);
+        EditText password=new EditText(this);MaintenanceInput.configure(password);
         password.setHint("رمز الصيانة: 4–6 خانات (0–9، *، #)");
         android.widget.LinearLayout fields=new android.widget.LinearLayout(this);
         fields.setOrientation(android.widget.LinearLayout.VERTICAL);fields.addView(password);
-        android.widget.CheckBox legacy=new android.widget.CheckBox(this);
-        legacy.setText("استخدام كلمة المرور القديمة");fields.addView(legacy);
-        legacy.setOnCheckedChangeListener((button,checked)->{MaintenanceInput.configure(password,checked);password.requestFocus();});
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle("خروج المدير من شاشة الشركة").setMessage("يستمر منع مشاركة الإنترنت والحظر الحالي. للعودة استخدم زر إنهاء الصيانة داخل تطبيق إنجاز، أو أعد التفعيل من اللوحة.").setView(fields).setNegativeButton("إلغاء",null).setPositiveButton("دخول",null).create();
         dialog.setOnShowListener(x->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);char[] secret=password.getText().toString().toCharArray();password.setText("");
-            KioskController.LOCAL.execute(()->{try{boolean ok=KioskController.recover(getApplicationContext(),secret);runOnUiThread(()->{if(ok){dialog.dismiss();startActivity(new Intent(this,MainActivity.class));finish();}else{dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);password.setError("كلمة مرور غير صحيحة أو محاولات كثيرة؛ انتظر ثم أعد المحاولة");}});}catch(Exception ex){runOnUiThread(()->{dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);password.setError("تعذر إكمال الصيانة");});}});
+            if (!MaintenanceInput.valid(secret)) { java.util.Arrays.fill(secret, '\0'); password.setError("أدخل رمزًا من 4 إلى 6 خانات: 0–9 و* و#"); dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true); return; }
+            KioskController.LOCAL.execute(()->{try{boolean ok=KioskController.recover(getApplicationContext(),secret);runOnUiThread(()->{if(ok){dialog.dismiss();startActivity(new Intent(this,MainActivity.class));finish();}else{dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);password.setError("رمز صيانة غير صحيح أو محاولات كثيرة؛ انتظر ثم أعد المحاولة");}});}catch(Exception ex){runOnUiThread(()->{dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);password.setError("تعذر إكمال الصيانة");});}});
         }));dialog.show();
         password.requestFocus();
         dialog.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);

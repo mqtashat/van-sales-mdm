@@ -15,7 +15,7 @@ import static org.junit.Assert.*;
 public class MaintenanceInputTest {
     @Test public void keypadMasksAndAcceptsOnlyDigitsStarHashWithSixCharacterLimit() {
         EditText field = new EditText(RuntimeEnvironment.getApplication());
-        MaintenanceInput.configure(field, false);
+        MaintenanceInput.configure(field);
         assertEquals(InputType.TYPE_CLASS_PHONE, field.getInputType() & InputType.TYPE_MASK_CLASS);
         assertTrue(field.getTransformationMethod() instanceof PasswordTransformationMethod);
         field.getText().append("1a2+*#56");
@@ -23,13 +23,10 @@ public class MaintenanceInputTest {
         field.getText().append("7");
         assertEquals("12*#56", field.getText().toString());
     }
-    @Test public void legacyModeKeepsOldPasswordsAccessibleAndSwitchClearsSecret() {
-        EditText field = new EditText(RuntimeEnvironment.getApplication());
-        MaintenanceInput.configure(field, true);
-        field.getText().append("Old-Password#2026");
-        assertEquals("Old-Password#2026", field.getText().toString());
-        assertTrue(field.getTransformationMethod() instanceof PasswordTransformationMethod);
-        MaintenanceInput.configure(field, false);
-        assertEquals("", field.getText().toString());
+    @Test public void rejectsOldPasswordsAndInvalidLengths() {
+        assertTrue(MaintenanceInput.valid("12*#".toCharArray()));
+        assertTrue(MaintenanceInput.valid("123456".toCharArray()));
+        for (String pin : new String[]{"", "123", "1234567", "Old-Password#2026", "12 4", "١٢٣٤"})
+            assertFalse(MaintenanceInput.valid(pin.toCharArray()));
     }
 }

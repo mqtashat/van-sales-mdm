@@ -100,7 +100,7 @@ public class KioskResumeTest {
         KioskController.apply(c,policy(8,true));
         assertThrows(IllegalStateException.class,()->KioskController.confirmLocked(c));
         assertEquals(0,KioskController.prefs(c).getLong("configured_revision",0));
-        KioskController.cacheDeviceName(c,"مندوب عمان");assertEquals("مندوب عمان",KioskController.deviceName(c));
+        KioskController.cacheDeviceName(c,"موظف عمان");assertEquals("موظف عمان",KioskController.deviceName(c));
         KioskController.cacheDeviceName(c,"");assertEquals("جهاز الشركة",KioskController.deviceName(c));
     }
 }

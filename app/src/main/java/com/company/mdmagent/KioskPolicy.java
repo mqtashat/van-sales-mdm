@@ -10,7 +10,7 @@ final class KioskPolicy {
     final String salt, hash;
     KioskPolicy(long revision, boolean enabled, Set<String> apps, String salt, String hash) {
         this.revision = revision; this.enabled = enabled;
-        this.apps = Collections.unmodifiableSet(new TreeSet<>(apps)); this.salt = salt; this.hash = hash;
+        this.apps = Collections.unmodifiableSet(new LinkedHashSet<>(apps)); this.salt = salt; this.hash = hash;
     }
     static KioskPolicy parse(Map<String, Object> data, long accepted) {
         if (data == null || !Long.valueOf(1).equals(data.get("schema_version"))
@@ -18,7 +18,7 @@ final class KioskPolicy {
                 || !(data.get("enabled") instanceof Boolean)) throw new IllegalArgumentException("Invalid/stale kiosk policy");
         Object raw = data.get("allowed_apps");
         if (!(raw instanceof List) || ((List<?>)raw).size() > 50) throw new IllegalArgumentException("Invalid allowed_apps");
-        Set<String> apps = new TreeSet<>();
+        Set<String> apps = new LinkedHashSet<>();
         for (Object p : (List<?>)raw) {
             if (!(p instanceof String) || ((String)p).length()>150
                     || !((String)p).matches("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+"))

@@ -33,6 +33,19 @@ final class KioskController {
         SharedPreferences p=prefs(c);
         return p.getLong("recovery_revision",0)>0 && p.getLong("recovery_revision",0)>=p.getLong("accepted_revision",0);
     }
+    static List<String> orderedApps(Context c) {
+        Set<String> allowed = new HashSet<>(prefs(c).getStringSet("apps",Collections.emptySet()));
+        List<String> ordered = new ArrayList<>();
+        try {
+            org.json.JSONArray saved = new org.json.JSONArray(prefs(c).getString("apps_order","[]"));
+            for (int i=0;i<saved.length();i++) {
+                String pkg = saved.optString(i);
+                if (allowed.remove(pkg)) ordered.add(pkg);
+            }
+        } catch (org.json.JSONException ignored) { /* Older devices retain stable alphabetical order. */ }
+        ordered.addAll(new TreeSet<>(allowed));
+        return ordered;
+    }
     static String deviceName(Context c) { String name=prefs(c).getString("device_name","").trim(); return name.isEmpty()?"جهاز الشركة":name; }
     static void cacheDeviceName(Context c,String name) {
         requireSave(prefs(c).edit().putString("device_name",name==null?"":name.trim()).commit());
@@ -45,7 +58,7 @@ final class KioskController {
         if(policy.revision<p.getLong("accepted_revision",0))throw new IllegalArgumentException("Stale kiosk policy");
         boolean keepMaintenance=inMaintenance(c)&&policy.revision<=p.getLong("recovery_revision",0);
         requireSave(p.edit().putLong("accepted_revision",policy.revision).putBoolean("requested_enabled",policy.enabled)
-                .putStringSet("apps",new HashSet<>(policy.apps)).putString("exit_salt",policy.salt).putString("exit_hash",policy.hash).commit());
+                .putStringSet("apps",new HashSet<>(policy.apps)).putString("apps_order",new org.json.JSONArray(policy.apps).toString()).putString("exit_salt",policy.salt).putString("exit_hash",policy.hash).commit());
         if(!policy.enabled) {
             requireSave(p.edit().putLong("recovery_revision",0).commit());
             try { disable(c); requireSave(p.edit().putLong("configured_revision",policy.revision).putString("last_error","").commit()); }
@@ -63,7 +76,7 @@ final class KioskController {
         if(!p.contains("requested_enabled"))throw new IllegalStateException("يلزم إجراء مزامنة واحدة للتحقق من سياسة النسخة السابقة");
         if(!p.getBoolean("requested_enabled",false))throw new IllegalStateException("شاشة الشركة معطلة من الإدارة");
         Map<String,Object> data=new HashMap<>();data.put("schema_version",1L);data.put("revision",p.getLong("accepted_revision",0));
-        data.put("enabled",true);data.put("allowed_apps",new ArrayList<>(p.getStringSet("apps",Collections.emptySet())));
+        data.put("enabled",true);data.put("allowed_apps",orderedApps(c));
         data.put("exit_salt",p.getString("exit_salt",""));data.put("exit_hash",p.getString("exit_hash",""));
         KioskPolicy policy=KioskPolicy.parse(data,p.getLong("accepted_revision",0));
         long recovery=p.getLong("recovery_revision",0);
@@ -115,7 +128,7 @@ final class KioskController {
         // Make local password recovery reachable before any OS restriction can fail.
         if (c.getPackageManager().getComponentEnabledSetting(new ComponentName(c,KioskActivity.class)) != PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
             c.getPackageManager().setComponentEnabledSetting(new ComponentName(c,KioskActivity.class),PackageManager.COMPONENT_ENABLED_STATE_ENABLED,PackageManager.DONT_KILL_APP);
-        requireSave(p.edit().putStringSet("apps",new HashSet<>(policy.apps)).putBoolean("enabled",true).commit());
+        requireSave(p.edit().putStringSet("apps",new HashSet<>(policy.apps)).putString("apps_order",new org.json.JSONArray(policy.apps).toString()).putBoolean("enabled",true).commit());
         d.setLockTaskPackages(a,list.toArray(new String[0]));
         if(Build.VERSION.SDK_INT>=30)d.setLockTaskFeatures(a,DevicePolicyManager.LOCK_TASK_FEATURE_HOME
                 |DevicePolicyManager.LOCK_TASK_FEATURE_SYSTEM_INFO|DevicePolicyManager.LOCK_TASK_FEATURE_KEYGUARD
