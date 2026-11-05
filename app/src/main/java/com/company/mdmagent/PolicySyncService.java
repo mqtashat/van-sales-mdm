@@ -634,7 +634,22 @@ public class PolicySyncService extends Service {
                             if (revision != null && revision > KioskController.prefs(PolicySyncService.this).getLong("accepted_revision", 0))
                                 SyncEngine.requestSync(getApplicationContext(), "kiosk_policy_changed");
                         });
-                return () -> { reg.remove(); kiosk.remove(); };
+                final ListenerRegistration inventory = db.collection("inventoryRefreshRequests").document(targetUid)
+                        .addSnapshotListener((snapshot, error) -> {
+                            if (error != null || snapshot == null || snapshot.getMetadata().isFromCache()
+                                    || snapshot.getMetadata().hasPendingWrites() || !SESSION.hasActiveListenersFor(targetUid)) return;
+                            String id = snapshot.get("request_id") instanceof String ? snapshot.getString("request_id") : "";
+                            if (!id.isEmpty() && !id.equals(getSharedPreferences("inventory-state",0).getString("completed_request","")))
+                                SyncEngine.requestSync(getApplicationContext(), "inventory_refresh_requested");
+                        });
+                final ListenerRegistration permissions = db.collection("appPermissionPolicies").document(targetUid).collection("apps")
+                        .addSnapshotListener((snapshot, error) -> {
+                            if (error != null || snapshot == null || snapshot.getMetadata().isFromCache()
+                                    || snapshot.getMetadata().hasPendingWrites() || !SESSION.hasActiveListenersFor(targetUid)) return;
+                            if (!snapshot.getDocumentChanges().isEmpty())
+                                SyncEngine.requestSync(getApplicationContext(), "app_permissions_changed");
+                        });
+                return () -> { reg.remove(); kiosk.remove(); inventory.remove(); permissions.remove(); };
             }
         };
         boolean attachedNew = SESSION.attachListenersIfNeeded(uid, factory);

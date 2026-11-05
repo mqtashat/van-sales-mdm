@@ -25,7 +25,7 @@
             <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.HOME" /><category android:name="android.intent.category.DEFAULT" /></intent-filter>
         </activity>
         <receiver android:name=".AppChangeReceiver" android:exported="false"><intent-filter>
-            <action android:name="android.intent.action.PACKAGE_ADDED" /><action android:name="android.intent.action.PACKAGE_REMOVED" /><action android:name="android.intent.action.PACKAGE_CHANGED" /><data android:scheme="package" />
+            <action android:name="android.intent.action.PACKAGE_ADDED" /><action android:name="android.intent.action.PACKAGE_REMOVED" /><action android:name="android.intent.action.PACKAGE_CHANGED" /><action android:name="android.intent.action.PACKAGE_REPLACED" /><data android:scheme="package" />
         </intent-filter></receiver>
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
