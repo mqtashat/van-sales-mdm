@@ -11,6 +11,8 @@ public class AppRestrictionsTest {
         Set<String> persisted = new HashSet<>();
         Map<String, String> protectedApps = new HashMap<>();
         Set<String> failHide = new HashSet<>(), failRestore = new HashSet<>();
+        Set<String> absent = new HashSet<>();
+        public boolean isAbsent(String pkg) { return absent.contains(pkg); }
         boolean saveAllowed = true;
         final List<String> calls = new ArrayList<>();
         public String protectionReason(String pkg) { return protectedApps.get(pkg); }
@@ -31,6 +33,17 @@ public class AppRestrictionsTest {
             persisted = new HashSet<>(packages);
             return true;
         }
+    }
+
+    @Test public void absentTargetRemainsDesiredAndIsHiddenAfterInstall() {
+        Fake f = new Fake(); f.absent.add("com.example.later");
+        Set<String> desired = Set.of("com.example.later");
+        AppRestrictions.Result first = AppRestrictions.reconcile(desired, Set.of(), f, f);
+        assertTrue(first.complete()); assertTrue(first.absent.contains("com.example.later"));
+        assertTrue(f.calls.isEmpty()); assertTrue(desired.contains("com.example.later"));
+        f.absent.clear();
+        assertTrue(AppRestrictions.reconcile(desired, Set.of(), f, f).complete());
+        assertTrue(f.hidden.contains("com.example.later"));
     }
 
     @Test public void protectedAndRejectedAppsDoNotBlockOtherAppsOrTethering() {

@@ -30,6 +30,7 @@ public class MainActivity extends Activity {
     private TextView deviceHeading, deviceUid, diagnostics;
     private Button register, copy;
     private TextView status;
+    private String syncDetails = "";
     private Button sync;
     private Button resumeKiosk;
     private boolean resumingKiosk;
@@ -125,6 +126,11 @@ public class MainActivity extends Activity {
         });
 
         status=screen.text("",14,android.graphics.Color.WHITE);status.setTextIsSelectable(true);actionCard.addView(status);
+        android.widget.Button syncDetailsButton = screen.button("عرض تفاصيل المزامنة");
+        actionCard.addView(syncDetailsButton);
+        syncDetailsButton.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
+                .setTitle("تفاصيل المزامنة").setMessage(syncDetails.isEmpty() ? "لا توجد تفاصيل بعد" : syncDetails)
+                .setPositiveButton("إغلاق", null).show());
         LinearLayout more=screen.card("معلومات إضافية");
         Button expand=screen.button("عرض الخصوصية والتشخيص");more.addView(expand);
         LinearLayout extra=screen.column();extra.setVisibility(View.GONE);more.addView(extra);
@@ -149,7 +155,10 @@ public class MainActivity extends Activity {
             if (isDestroyed()) return;
             sync.setEnabled(!inProgress);
             if (message != null && !message.isEmpty()) {
-                status.setText(message);
+                syncDetails = message;
+                status.setText(message.length() > 240
+                        ? "لم تكتمل بعض إجراءات المزامنة. اضغط عرض تفاصيل المزامنة لمعرفة التطبيقات أو الإجراءات المتأثرة."
+                        : message);
             }
             updateIdentityView();
             if(resumeKiosk!=null)resumeKiosk.setVisibility(KioskController.inMaintenance(this)?View.VISIBLE:View.GONE);

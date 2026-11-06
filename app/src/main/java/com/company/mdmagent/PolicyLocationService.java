@@ -19,6 +19,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import com.google.firebase.firestore.FirebaseFirestore;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -40,6 +41,10 @@ public class PolicyLocationService extends Service implements LocationListener {
     private LocationManager locationManager;
     private Handler handler;
     private Runnable scheduleCheckRunnable;
+    private Runnable acquisitionTimeout;
+    private boolean acquiring;
+    private long lastDrainElapsed;
+    private final LocationQualityFilter quality = new LocationQualityFilter();
 
     public static boolean isServiceRunning() {
         return RUNNING.get();
@@ -127,9 +132,7 @@ public class PolicyLocationService extends Service implements LocationListener {
     }
 
     private void startScheduleChecker() {
-        if (scheduleCheckRunnable != null) {
-            handler.removeCallbacks(scheduleCheckRunnable);
-        }
+        if (scheduleCheckRunnable != null) return; // Repeated sync must not restart sampling.
 
         scheduleCheckRunnable = new Runnable() {
             @Override
@@ -146,7 +149,7 @@ public class PolicyLocationService extends Service implements LocationListener {
                     return;
                 }
 
-                long delayMs = policy.samplingIntervalSeconds * 1000L;
+                long delayMs = quality.isMoving() ? 30_000L : 60_000L;
                 handler.postDelayed(this, Math.max(15_000L, delayMs));
             }
         };
@@ -168,9 +171,15 @@ public class PolicyLocationService extends Service implements LocationListener {
             // Outside work hours schedule: do NOT sample location!
             updateNotification("التتبع متوقف حاليًا: خارج ساعات العمل المحددة من الإدارة");
             removeLocationUpdates();
+            quality.reset();
             return;
         }
 
+        String activeUid = SyncEngine.getCurrentAuthenticatedUid();
+        if (activeUid == null || !SyncEngine.isDeviceApproved(this, activeUid)) {
+            removeLocationUpdates(); quality.reset(); return;
+        }
+        drainIfDue(activeUid);
         updateNotification("تتبع الموقع نشط: ضمن ساعات العمل المقررة");
         requestSingleFreshLocation();
     }
@@ -183,7 +192,7 @@ public class PolicyLocationService extends Service implements LocationListener {
     }
 
     private void requestSingleFreshLocation() {
-        if (locationManager == null) return;
+        if (locationManager == null || acquiring) return;
         if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             Log.w(TAG, "location_permission_missing");
             return;
@@ -193,17 +202,28 @@ public class PolicyLocationService extends Service implements LocationListener {
             boolean gpsAvailable = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
             boolean networkAvailable = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
 
+            acquiring = true;
+            acquisitionTimeout = () -> {
+                removeLocationUpdates();
+                updateNotification("لم تتوفر قراءة دقيقة حديثة؛ لم تُسجّل نقطة جديدة");
+            };
+            handler.postDelayed(acquisitionTimeout, 25_000L);
             if (gpsAvailable) {
                 locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 0f, this);
-            } else if (networkAvailable) {
+            }
+            if (networkAvailable) {
                 locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 0f, this);
             }
         } catch (Exception ex) {
+            removeLocationUpdates();
             Log.w(TAG, "requestLocationUpdates failed: " + ex.getMessage());
         }
     }
 
     private void removeLocationUpdates() {
+        acquiring = false;
+        if (acquisitionTimeout != null) handler.removeCallbacks(acquisitionTimeout);
+        acquisitionTimeout = null;
         if (locationManager != null) {
             try {
                 locationManager.removeUpdates(this);
@@ -213,25 +233,27 @@ public class PolicyLocationService extends Service implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
-        if (location == null) return;
-        removeLocationUpdates();
+        if (location == null || !acquiring) return;
 
         // Re-verify tracking enabled and schedule compliance upon coordinate arrival
         LocationPolicy policy = LocationPolicy.getLocal(this);
         long now = System.currentTimeMillis();
         if (!policy.enabled || !policy.shouldCollectAt(now)) {
+            removeLocationUpdates();
+            quality.reset();
             Log.i(TAG, "location_dropped_outside_schedule_or_disabled");
             return;
         }
 
-        // Freshness and accuracy check: drop points older than 2 minutes or with accuracy worse than 150m
-        long recordedAt = location.getTime() > 0 ? location.getTime() : now;
-        if (Math.abs(now - recordedAt) > 120_000L) {
-            Log.i(TAG, "location_dropped_stale_cache");
-            return;
-        }
-        if (location.hasAccuracy() && location.getAccuracy() > 150f) {
-            Log.i(TAG, "location_dropped_low_accuracy: acc=" + location.getAccuracy());
+        long recordedAt = location.getTime();
+        long ageMs = (SystemClock.elapsedRealtimeNanos() - location.getElapsedRealtimeNanos()) / 1_000_000L;
+        if (!LocationQualityFilter.valid(location.getLatitude(), location.getLongitude(),
+                location.hasAccuracy() ? location.getAccuracy() : Float.NaN,
+                ageMs, recordedAt, now)) return; // Keep acquiring after bad first fix.
+        removeLocationUpdates();
+        if (!quality.accept(location.getLatitude(), location.getLongitude(), location.getAccuracy(),
+                SystemClock.elapsedRealtime())) {
+            updateNotification("قراءة حديثة؛ لا توجد حركة مؤكدة تستدعي نقطة جديدة");
             return;
         }
 
@@ -253,7 +275,7 @@ public class PolicyLocationService extends Service implements LocationListener {
                 recordedAt,
                 location.getLatitude(),
                 location.getLongitude(),
-                location.hasAccuracy() ? location.getAccuracy() : 50f,
+                location.getAccuracy(),
                 location.hasSpeed() ? location.getSpeed() : 0f,
                 battery
         );
@@ -262,7 +284,13 @@ public class PolicyLocationService extends Service implements LocationListener {
         // Do NOT log latitude or longitude to public logs
         Log.i(TAG, "location_point_captured_safely: acc=" + p.accuracyMeters + " battery=" + battery);
 
-        // Attempt async queue drain on background thread
+        drainIfDue(uid);
+    }
+
+    private void drainIfDue(String uid) {
+        long elapsed = SystemClock.elapsedRealtime();
+        if (lastDrainElapsed != 0 && elapsed - lastDrainElapsed < 60_000) return;
+        lastDrainElapsed = elapsed;
         AgentApp.SYNC.execute(() -> {
             try {
                 LocationQueue.drainToFirestore(this, FirebaseFirestore.getInstance(), uid, 20);

@@ -13,6 +13,7 @@ import java.util.*;
 
 final class AppRestrictions {
     interface Backend {
+        default boolean isAbsent(String pkg) throws Exception { return false; }
         String protectionReason(String pkg) throws Exception;
         boolean isHidden(String pkg) throws Exception;
         void setHidden(String pkg, boolean hidden) throws Exception;
@@ -22,6 +23,7 @@ final class AppRestrictions {
     // One result per failed package; never report a partial request as fully applied.
     static final class Result {
         final Map<String, String> failures = new LinkedHashMap<>();
+        final Set<String> absent = new TreeSet<>();
         boolean complete() { return failures.isEmpty(); }
         String summary() {
             StringBuilder out = new StringBuilder();
@@ -50,6 +52,7 @@ final class AppRestrictions {
         }
         for (String pkg : new TreeSet<>(desired)) {
             try {
+                if (backend.isAbsent(pkg)) { result.absent.add(pkg); continue; }
                 String protection = backend.protectionReason(pkg);
                 if (protection != null) throw new IllegalArgumentException(protection);
                 // Persist recovery intent before hiding; a crash cannot orphan a hidden app.
@@ -81,6 +84,19 @@ final class AppRestrictions {
                         Set<String> desired, SharedPreferences prefs) {
         Set<String> previous = new HashSet<>(prefs.getStringSet("hidden_by_agent", Collections.emptySet()));
         Backend backend = new Backend() {
+            // Full visibility is explicitly declared; retain recovery records for hidden apps.
+            @Override public boolean isAbsent(String pkg) throws Exception {
+                PackageManager pm = context.getPackageManager();
+                if (pm.checkPermission("android.permission.QUERY_ALL_PACKAGES", context.getPackageName())
+                        != PackageManager.PERMISSION_GRANTED) return false;
+                try {
+                    ApplicationInfo info = pm.getApplicationInfo(pkg, PackageManager.MATCH_UNINSTALLED_PACKAGES);
+                    return (info.flags & ApplicationInfo.FLAG_INSTALLED) == 0 && !dpm.isApplicationHidden(admin, pkg);
+                } catch (PackageManager.NameNotFoundException absent) {
+                    // Tracked hidden packages remain uncertain until explicitly resolved.
+                    return !previous.contains(pkg);
+                }
+            }
             // Resolve lazily so protection discovery errors become per-app failures.
             @Override public String protectionReason(String pkg) throws Exception {
                 PackageManager pm = context.getPackageManager();
