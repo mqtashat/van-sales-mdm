@@ -141,6 +141,13 @@ public class MainActivity extends Activity {
             }
             startActivity(new android.content.Intent(this,CallLogPilotActivity.class));
         });
+        LinearLayout callCloud=screen.card("مكالمات الشركة — الربط باللوحة");
+        callCloud.addView(screen.text("إرسال أرقام المكالمات واتجاهها ومدتها بعد تفعيل معلن مستقل. لا صوت أو رسائل أو جهات اتصال.",14,android.graphics.Color.LTGRAY));
+        Button callCloudButton=screen.button("إعداد مزامنة مكالمات الشركة");callCloud.addView(callCloudButton);
+        callCloudButton.setOnClickListener(v -> {
+            if (CallLogPilotActivity.canAccess(this)) startActivity(new android.content.Intent(this,CallLogCloudActivity.class));
+            else Toast.makeText(this,"ادخل الصيانة على جهاز الشركة المعتمد أولًا.",Toast.LENGTH_LONG).show();
+        });
         LinearLayout more=screen.card("معلومات إضافية");
         Button expand=screen.button("عرض الخصوصية والتشخيص");more.addView(expand);
         LinearLayout extra=screen.column();extra.setVisibility(View.GONE);more.addView(extra);

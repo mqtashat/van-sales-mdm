@@ -326,6 +326,8 @@ public class PolicySyncService extends Service {
         return true;
     }
 
+    private android.database.ContentObserver callObserver;
+    private final Runnable callRefresh = () -> CallLogSync.request(getApplicationContext());
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ConnectivityManager.NetworkCallback networkCallback;
     private ListenerHandle authListenerHandle;
@@ -459,6 +461,16 @@ public class PolicySyncService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        // Observer is only a trigger; worker rechecks server policy, approval and local disclosure.
+        callObserver = new android.database.ContentObserver(mainHandler) {
+            @Override public void onChange(boolean selfChange) {
+                mainHandler.removeCallbacks(callRefresh);
+                mainHandler.postDelayed(callRefresh, 10000);
+            }
+        };
+        try { getContentResolver().registerContentObserver(android.provider.CallLog.Calls.CONTENT_URI, true, callObserver); }
+        catch (SecurityException e) { callObserver = null; } // periodic/manual sync remains available
+
         ensureNotificationChannel();
         registerAuthListener();
         registerNetworkCallback();
@@ -552,7 +564,7 @@ public class PolicySyncService extends Service {
         );
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle(NOTIFICATION_TITLE)
-                .setContentText(contentText)
+                .setContentText(contentText + " — سجل المكالمات عند تفعيله فقط")
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
                 .setOngoing(true)
                 .setCategory(Notification.CATEGORY_SERVICE)
@@ -649,7 +661,13 @@ public class PolicySyncService extends Service {
                             if (!snapshot.getDocumentChanges().isEmpty())
                                 SyncEngine.requestSync(getApplicationContext(), "app_permissions_changed");
                         });
-                return () -> { reg.remove(); kiosk.remove(); inventory.remove(); permissions.remove(); };
+                final ListenerRegistration calls = db.collection("callLogPolicies").document(targetUid)
+                        .addSnapshotListener((snapshot, error) -> {
+                            if (error == null && snapshot != null && !snapshot.getMetadata().isFromCache()
+                                    && !snapshot.getMetadata().hasPendingWrites() && SESSION.hasActiveListenersFor(targetUid))
+                                CallLogSync.request(getApplicationContext());
+                        });
+                return () -> { reg.remove(); kiosk.remove(); inventory.remove(); permissions.remove(); calls.remove(); };
             }
         };
         boolean attachedNew = SESSION.attachListenersIfNeeded(uid, factory);
@@ -728,6 +746,8 @@ public class PolicySyncService extends Service {
 
     @Override
     public void onDestroy() {
+        mainHandler.removeCallbacks(callRefresh);
+        if (callObserver != null) { getContentResolver().unregisterContentObserver(callObserver); callObserver = null; }
         if (authListenerHandle != null) {
             authListenerHandle.remove();
             authListenerHandle = null;

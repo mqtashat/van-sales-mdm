@@ -28,6 +28,7 @@
         <receiver android:name=".AppChangeReceiver" android:exported="false"><intent-filter>
             <action android:name="android.intent.action.PACKAGE_ADDED" /><action android:name="android.intent.action.PACKAGE_REMOVED" /><action android:name="android.intent.action.PACKAGE_CHANGED" /><action android:name="android.intent.action.PACKAGE_REPLACED" /><data android:scheme="package" />
         </intent-filter></receiver>
+        <activity android:name=".CallLogCloudActivity" android:exported="false" />
         <activity android:name=".CallLogPilotActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>

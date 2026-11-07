@@ -1,0 +1,86 @@
+    // INSERT inside match /databases/{database}/documents in CURRENT production rules.
+    // Uses existing isAdmin(), approved(uid), own(uid). Do not replace the host rules.
+    function callPolicyValid(d, uid) {
+      return d.keys().hasOnly(['schema_version','revision','enabled','collection_id','activated_at','retention_days','updated_at','updated_by_uid','audit_id'])
+        && d.schema_version == 1 && d.revision is int && d.revision > 0
+        && d.enabled is bool && d.collection_id is string && d.collection_id.matches('^[a-zA-Z0-9_-]{16,80}$')
+        && d.activated_at is timestamp && d.activated_at <= request.time
+        && d.retention_days == 30 && d.updated_at == request.time && d.updated_by_uid == request.auth.uid
+        && d.audit_id is string && d.audit_id.matches('^[a-zA-Z0-9_-]{16,80}$')
+        && getAfter(/databases/$(database)/documents/callLogAudit/$(d.audit_id)).data == {
+          'device_uid':uid, 'revision':d.revision, 'enabled':d.enabled, 'collection_id':d.collection_id,
+          'actor_uid':request.auth.uid, 'created_at':request.time
+        };
+    }
+    match /callLogPolicies/{uid} {
+      allow read: if isAdmin() || approved(uid);
+      allow create: if isAdmin() && callPolicyValid(request.resource.data,uid)
+        && request.resource.data.revision == 1 && request.resource.data.activated_at == request.time;
+      allow update: if isAdmin() && callPolicyValid(request.resource.data,uid)
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.audit_id != resource.data.audit_id
+        && (request.resource.data.enabled && !resource.data.enabled
+          ? (request.resource.data.collection_id != resource.data.collection_id && request.resource.data.activated_at == request.time)
+          : (request.resource.data.collection_id == resource.data.collection_id && request.resource.data.activated_at == resource.data.activated_at));
+      allow delete: if false;
+    }
+    match /callLogAudit/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && id.matches('^[a-zA-Z0-9_-]{16,80}$')
+        && request.resource.data.keys().hasOnly(['device_uid','revision','enabled','collection_id','actor_uid','created_at'])
+        && request.resource.data.device_uid is string && request.resource.data.device_uid.size() <= 128
+        && request.resource.data.revision is int && request.resource.data.revision > 0
+        && request.resource.data.enabled is bool && request.resource.data.collection_id is string
+        && request.resource.data.collection_id.matches('^[a-zA-Z0-9_-]{16,80}$')
+        && request.resource.data.actor_uid == request.auth.uid && request.resource.data.created_at == request.time
+        && getAfter(/databases/$(database)/documents/callLogPolicies/$(request.resource.data.device_uid)).data.audit_id == id;
+      allow update, delete: if false;
+    }
+    function callEventValid(d,uid) {
+      let p = get(/databases/$(database)/documents/callLogPolicies/$(uid)).data;
+      return p.enabled == true && d.collection_id == p.collection_id
+        && d.keys().hasOnly(['schema_version','collection_id','started_at','number','number_available','call_type','duration_seconds','received_at','expires_at','agent_version'])
+        && d.schema_version == 1 && d.started_at is timestamp && d.started_at >= p.activated_at && d.started_at <= request.time
+        && d.started_at > request.time - duration.value(30,'d')
+        && d.number is string && d.number.matches('^[+0-9*#]{0,40}$')
+        && d.number_available is bool && d.number_available == (d.number.size() > 0)
+        && d.call_type is int && d.call_type >= 0 && d.call_type <= 7
+        && d.duration_seconds is int && d.duration_seconds >= -1 && d.duration_seconds <= 604800
+        && d.received_at == request.time && d.expires_at == d.started_at + duration.value(30,'d')
+        && d.agent_version is string && d.agent_version.size() > 0 && d.agent_version.size() <= 50;
+    }
+    match /deviceCallLogs/{uid}/calls/{callId} {
+      allow read: if isAdmin();
+      allow create: if approved(uid) && callId.matches('^[0-9a-f]{64}$') && callEventValid(request.resource.data,uid);
+      allow update: if approved(uid) && callEventValid(request.resource.data,uid)
+        && request.resource.data.started_at == resource.data.started_at
+        && request.resource.data.collection_id == resource.data.collection_id;
+      allow delete: if isAdmin();
+    }
+    match /callLogStatus/{uid} {
+      allow read: if isAdmin() || approved(uid);
+      allow create, update: if approved(uid)
+        && request.resource.data.keys().hasOnly(['schema_version','state','policy_revision','collection_id','local_started_at','reported_at','has_more','uploaded_count','agent_version'])
+        && request.resource.data.schema_version == 1
+        && request.resource.data.state in ['disabled','awaiting_activation','permission_required','clock_error','catching_up','synced']
+        && request.resource.data.policy_revision is int && request.resource.data.policy_revision >= 0
+        && request.resource.data.collection_id is string && request.resource.data.collection_id.size() <= 80
+        && (request.resource.data.local_started_at == null || request.resource.data.local_started_at is timestamp)
+        && request.resource.data.reported_at == request.time && request.resource.data.has_more is bool
+        && request.resource.data.uploaded_count is int && request.resource.data.uploaded_count >= 0 && request.resource.data.uploaded_count <= 500
+        && request.resource.data.agent_version is string && request.resource.data.agent_version.size() > 0 && request.resource.data.agent_version.size() <= 50;
+      allow delete: if false;
+    }
+    match /employeePhoneDirectory/{id} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['employee_id','employee_name','device_uid','number_e164','valid_from','valid_to','updated_at','updated_by_uid'])
+        && request.resource.data.employee_id is string && request.resource.data.employee_id.size() > 0 && request.resource.data.employee_id.size() <= 128
+        && request.resource.data.employee_name is string && request.resource.data.employee_name.size() > 0 && request.resource.data.employee_name.size() <= 120
+        && request.resource.data.device_uid is string && request.resource.data.device_uid.size() <= 128
+        && request.resource.data.number_e164 is string && request.resource.data.number_e164.matches('^\\+[1-9][0-9]{6,14}$')
+        && request.resource.data.valid_from is timestamp
+        && (request.resource.data.valid_to == null || (request.resource.data.valid_to is timestamp && request.resource.data.valid_to > request.resource.data.valid_from))
+        && request.resource.data.updated_at == request.time && request.resource.data.updated_by_uid == request.auth.uid;
+      allow delete: if isAdmin();
+    }
