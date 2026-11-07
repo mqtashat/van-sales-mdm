@@ -9,7 +9,7 @@ before(async () => {
   env = await initializeTestEnvironment({
     projectId: 'demo-mdm',
     firestore: {
-      rules: readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8').replace('match /databases/{database}/documents {', 'match /databases/{database}/documents {\n' + readFileSync(new URL('../docs/call-log/firestore.calls.fragment.rules', import.meta.url), 'utf8'))
+      rules: readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8').replace('match /databases/{database}/documents {', () => 'match /databases/{database}/documents {\n' + readFileSync(new URL('../docs/call-log/firestore.calls.fragment.rules', import.meta.url), 'utf8'))
     },
     storage: {
       rules: readFileSync(new URL('../storage.rules', import.meta.url), 'utf8')

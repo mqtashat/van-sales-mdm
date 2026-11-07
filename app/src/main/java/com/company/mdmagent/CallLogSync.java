@@ -69,12 +69,12 @@ final class CallLogSync {
         if (!Boolean.TRUE.equals(enrollment.getBoolean("approved"))) return;
         DocumentSnapshot p = policy(db, uid);
         SharedPreferences s = prefs(c);
-        if (!validPolicy(p)) { report(db, uid, p, "disabled", 0, false, 0); return; }
+        if (!validPolicy(p)) { s.edit().putString("message", "سياسة المكالمات متوقفة؛ لم تتم قراءة السجل.").apply(); report(db, uid, p, "disabled", 0, false, 0); return; }
         String session = p.getString("collection_id");
-        if (!consentMatches(s, uid, session)) { report(db, uid, p, "awaiting_activation", 0, false, 0); return; }
+        if (!consentMatches(s, uid, session)) { s.edit().putString("message", "بانتظار تأكيد التفعيل المحلي للجلسة الحالية.").apply(); report(db, uid, p, "awaiting_activation", 0, false, 0); return; }
         final long consentStart = s.getLong("since", 0);
         long since = Math.max(consentStart, p.getTimestamp("activated_at").toDate().getTime());
-        if (!permitted(c)) { report(db, uid, p, "permission_required", since, false, 0); return; }
+        if (!permitted(c)) { s.edit().putString("message", "إذن سجل المكالمات غير متاح؛ لم تتم القراءة.").apply(); report(db, uid, p, "permission_required", since, false, 0); return; }
         final long now = System.currentTimeMillis();
         long floor = Math.max(since, now - RETENTION_MS + 60000);
         long cursorDate = Math.max(floor, s.getLong("cursor_date", floor));

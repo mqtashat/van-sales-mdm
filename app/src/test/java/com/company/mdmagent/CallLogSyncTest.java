@@ -1,7 +1,25 @@
 package com.company.mdmagent;
 import org.junit.Test;
 import static org.junit.Assert.*;
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner.class)
+@org.robolectric.annotation.Config(sdk=28, application=android.app.Application.class)
 public class CallLogSyncTest {
+    @Test public void consentIsBoundToDeviceAndCollectionAndCanBeRevoked() {
+        android.content.SharedPreferences p=CallLogSync.prefs(org.robolectric.RuntimeEnvironment.getApplication());
+        p.edit().clear().commit();
+        assertFalse(CallLogSync.consentMatches(p,"uid","session"));
+        p.edit().putString("uid","uid").putString("session","session").putLong("since",100).commit();
+        assertTrue(CallLogSync.consentMatches(p,"uid","session"));
+        assertFalse(CallLogSync.consentMatches(p,"other","session"));
+        assertFalse(CallLogSync.consentMatches(p,"uid","new_session"));
+        p.edit().clear().commit();
+        assertFalse(CallLogSync.consentMatches(p,"uid","session"));
+    }
+    @Test public void cloudActivationCannotOpenOutsideMaintenanceOnCompanyDevice() {
+        CallLogCloudActivity a=org.robolectric.Robolectric.buildActivity(CallLogCloudActivity.class).create().get();
+        assertTrue(a.isFinishing());
+    }
+
     @Test public void privateNumbersNeverEscape() {
         assertEquals("",CallLogSync.safeNumber("0791234567",false));
         assertEquals("+962791234567",CallLogSync.safeNumber("+962 79-1234567",true));
