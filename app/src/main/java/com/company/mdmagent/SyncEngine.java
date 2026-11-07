@@ -37,7 +37,7 @@ final class SyncEngine {
     }
 
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.5.0-pilot";
+    static final String AGENT_VERSION = "0.5.1-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -623,6 +623,8 @@ final class SyncEngine {
         BatteryManager battery = (BatteryManager) context.getSystemService(Context.BATTERY_SERVICE);
         state.put("battery_percent", battery != null ? battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) : 0);
         state.put("error", error.length() > 1000 ? error.substring(0, 1000) : error);
+        String restoreErr = RestrictionManager.prefs(context).getString("restriction_restoration_error", null);
+        state.put("restriction_restoration_error", restoreErr != null && !restoreErr.isEmpty() ? restoreErr.substring(0, Math.min(restoreErr.length(), 1000)) : null);
         state.put("agent_version", AGENT_VERSION);
         Tasks.await(db.collection("deviceStatus").document(uid).set(state), 25, TimeUnit.SECONDS);
 

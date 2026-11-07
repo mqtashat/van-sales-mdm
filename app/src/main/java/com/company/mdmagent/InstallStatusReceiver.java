@@ -37,16 +37,23 @@ public class InstallStatusReceiver extends BroadcastReceiver {
         int sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1);
         String packageName = intent.getStringExtra(PackageInstaller.EXTRA_PACKAGE_NAME);
 
-        Log.i(TAG, "Install commit result received: status=" + status + " msg=" + statusMessage + " session=" + sessionId + " pkg=" + packageName);
-
         // Load active task state
         SharedPreferences p = context.getSharedPreferences(PREFS_TASKS, Context.MODE_PRIVATE);
         String taskKey = "session_" + sessionId;
+        String attemptId = p.getString(taskKey + "_attempt_id", "");
         String cmdId = p.getString(taskKey + "_cmd_id", "");
         String uid = p.getString(taskKey + "_uid", "");
         String expectedCert = p.getString(taskKey + "_cert_sha256", "");
         long expectedVer = p.getLong(taskKey + "_version_code", 1L);
         boolean addToKiosk = p.getBoolean(taskKey + "_add_to_kiosk", false);
+
+        Log.i(TAG, "Install commit result received: status=" + status + " msg=" + statusMessage + " session=" + sessionId + " pkg=" + packageName + " attemptId=" + attemptId);
+
+        try {
+            RestrictionManager.restoreInstallRestrictionIfNeeded(context, attemptId);
+        } catch (Exception ex) {
+            Log.e(TAG, "Failed to restore install restriction in InstallStatusReceiver: " + ex.getMessage(), ex);
+        }
 
         if (packageName == null || packageName.isEmpty()) {
             packageName = p.getString(taskKey + "_pkg", "");
