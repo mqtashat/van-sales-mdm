@@ -131,6 +131,16 @@ public class MainActivity extends Activity {
         syncDetailsButton.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
                 .setTitle("تفاصيل المزامنة").setMessage(syncDetails.isEmpty() ? "لا توجد تفاصيل بعد" : syncDetails)
                 .setPositiveButton("إغلاق", null).show());
+        LinearLayout callCard=screen.card("تجربة سجل المكالمات");
+        callCard.addView(screen.text("اختبار محلي داخل الصيانة فقط؛ لا يرسل أرقامًا أو مكالمات للوحة. يبدأ بعد التفعيل الصريح ولا يستورد السجل القديم.",14,android.graphics.Color.LTGRAY));
+        Button callPilot=screen.button("فتح اختبار المكالمات");callCard.addView(callPilot);
+        callPilot.setOnClickListener(v -> {
+            if (!CallLogPilotActivity.canAccess(this)) {
+                Toast.makeText(this,"يلزم جهاز شركة معتمد والدخول إلى وضع الصيانة برمز المدير.",Toast.LENGTH_LONG).show();
+                return;
+            }
+            startActivity(new android.content.Intent(this,CallLogPilotActivity.class));
+        });
         LinearLayout more=screen.card("معلومات إضافية");
         Button expand=screen.button("عرض الخصوصية والتشخيص");more.addView(expand);
         LinearLayout extra=screen.column();extra.setVisibility(View.GONE);more.addView(extra);
