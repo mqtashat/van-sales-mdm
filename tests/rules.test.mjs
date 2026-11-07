@@ -9,7 +9,7 @@ before(async () => {
   env = await initializeTestEnvironment({
     projectId: 'demo-mdm',
     firestore: {
-      rules: readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8')
+      rules: readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8').replace('match /databases/{database}/documents {', () => 'match /databases/{database}/documents {\n' + readFileSync(new URL('../docs/call-log/firestore.calls.fragment.rules', import.meta.url), 'utf8'))
     },
     storage: {
       rules: readFileSync(new URL('../storage.rules', import.meta.url), 'utf8')
@@ -606,4 +606,56 @@ test('storage.rules: allows targeted approved device with active grant, denies n
     });
   });
   await assertFails(getBytes(ref(deviceACtx.storage(), 'company_apps/app1/release.apk')));
+});
+
+// Call-log integration rules are merged only in the emulator, never deployed here.
+const callSession = 'session_1234567890';
+const callId = 'a'.repeat(64);
+const callAdmin = () => env.authenticatedContext('consoleAdmin',{email:'mashhoor.info@gmail.com',email_verified:true,firebase:{sign_in_provider:'password'}}).firestore();
+async function seedCallPolicy(enabled=true) {
+  await env.withSecurityRulesDisabled(async ctx => {
+    await setDoc(doc(ctx.firestore(),'callLogPolicies/a'),{schema_version:1,revision:1,enabled,collection_id:callSession,activated_at:Timestamp.fromMillis(Date.now()-60000),retention_days:30,updated_at:Timestamp.now(),updated_by_uid:'consoleAdmin',audit_id:'audit_12345678901'});
+  });
+}
+function callRecord(overrides={}) {
+  const t=Date.now()-1000;
+  return {schema_version:1,collection_id:callSession,started_at:Timestamp.fromMillis(t),number:'+962790000001',number_available:true,call_type:2,duration_seconds:20,received_at:serverTimestamp(),expires_at:Timestamp.fromMillis(t+30*86400000),agent_version:'0.5.7-pilot',...overrides};
+}
+test('calls: approved own device writes metadata; other device and anonymous are denied',async()=>{
+  await seedCallPolicy();
+  const a=env.authenticatedContext('a').firestore(), b=env.authenticatedContext('b').firestore();
+  await assertSucceeds(setDoc(doc(a,'deviceCallLogs/a/calls/'+callId),callRecord()));
+  await assertFails(setDoc(doc(b,'deviceCallLogs/a/calls/'+callId),callRecord()));
+  await assertFails(getDoc(doc(a,'deviceCallLogs/a/calls/'+callId)));
+  await assertSucceeds(getDoc(doc(callAdmin(),'deviceCallLogs/a/calls/'+callId)));
+  await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(),'deviceCallLogs/a/calls/'+callId)));
+});
+test('calls: disabled, stale session, history and malformed metadata fail closed',async()=>{
+  const a=env.authenticatedContext('a').firestore(); const ref=doc(a,'deviceCallLogs/a/calls/'+callId);
+  await seedCallPolicy(false); await assertFails(setDoc(ref,callRecord()));
+  await seedCallPolicy();
+  await assertFails(setDoc(ref,callRecord({collection_id:'old_session_123456'})));
+  await assertFails(setDoc(ref,callRecord({started_at:Timestamp.fromMillis(Date.now()-120000)})));
+  await assertFails(setDoc(ref,callRecord({number:[],number_available:false})));
+  await assertFails(setDoc(ref,callRecord({number:'',number_available:true})));
+  await assertFails(setDoc(ref,callRecord({audio:'forbidden'})));
+  await assertFails(setDoc(ref,callRecord({expires_at:Timestamp.fromMillis(Date.now()+31*86400000)})));
+});
+test('calls: deterministic retry updates one document and cannot change its timestamp',async()=>{
+  await seedCallPolicy();const a=env.authenticatedContext('a').firestore(),ref=doc(a,'deviceCallLogs/a/calls/'+callId);
+  const record=callRecord(); await assertSucceeds(setDoc(ref,record));
+  await assertSucceeds(setDoc(ref,{...record,duration_seconds:25}));
+  await assertFails(setDoc(ref,callRecord()));
+  const snap=await getDocs(collection(callAdmin(),'deviceCallLogs/a/calls'));if(snap.size!==1)throw new Error('Duplicate call');
+});
+test('calls: admin policy creation requires atomic audit and device cannot enable itself',async()=>{
+  const admin=callAdmin(), id='audit_new_12345678';
+  const data={schema_version:1,revision:1,enabled:true,collection_id:callSession,activated_at:serverTimestamp(),retention_days:30,updated_at:serverTimestamp(),updated_by_uid:'consoleAdmin',audit_id:id};
+  await assertFails(setDoc(doc(admin,'callLogPolicies/a'),data));
+  const {writeBatch}=await import('firebase/firestore');const batch=writeBatch(admin);
+  batch.set(doc(admin,'callLogPolicies/a'),data);
+  batch.set(doc(admin,'callLogAudit/'+id),{device_uid:'a',revision:1,enabled:true,collection_id:callSession,actor_uid:'consoleAdmin',created_at:serverTimestamp()});
+  await assertSucceeds(batch.commit());
+  await assertFails(setDoc(doc(env.authenticatedContext('a').firestore(),'callLogPolicies/a'),data));
+  await assertFails(deleteDoc(doc(admin,'callLogAudit/'+id)));
 });

@@ -37,7 +37,7 @@ final class SyncEngine {
     }
 
     static final String TAG = "InjazMdmAgent";
-    static final String AGENT_VERSION = "0.5.6-pilot";
+    static final String AGENT_VERSION = "0.5.7-pilot";
     static final String PREFS_NAME = "applied-policy";
     static final String KEY_REVISION = "revision";
     static final String KEY_APPROVED_VERIFIED = "approved_verified";
@@ -442,6 +442,7 @@ final class SyncEngine {
             // Optional features cannot prevent the existing tethering/app policy or its status upload.
             String kioskError = KioskController.synchronize(context, db, uid);
             if (!kioskError.isEmpty()) Log.w(TAG, "kiosk_sync: " + kioskError);
+            CallLogSync.request(context);
             InventorySync.sync(context, db, uid, safeTrigger);
             try { AppPermissionSync.sync(context, db, uid); }
             catch (Exception permissionError) { Log.w(TAG, "app_permission_sync_unavailable", permissionError); }
